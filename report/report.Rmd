@@ -1,0 +1,223 @@
+---
+  html_document:
+    toc: true
+    highlight: zenburn
+    theme: united
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(tidy=TRUE, highlight=TRUE, dev="png",
+               cache=TRUE, highlight=TRUE, autodep=TRUE, warning=FALSE, error=FALSE,
+               message=FALSE, prompt=TRUE, comment='', fig.cap='')
+```
+
+```{r load-libraries}
+library(knitr)
+library(extrafont)
+library(stringr)
+library(ggplot2)
+library(dplyr)
+
+# remove scientific notation unless the numbers get really big
+options(scipen=5)
+
+experiment = c(rep("P10_control", 6), rep("P10_rescue", 6), rep("P13_control", 6),
+    rep("P13_rescue", 6))
+experiment = rep(experiment, 16)
+age = unname(sapply(experiment, function(x) { strsplit(x, "_")[[1]][1]}))
+status = unname(sapply(experiment, function(x) { strsplit(x, "_")[[1]][2]}))
+metadata = data.frame(experiment=experiment, age=age, status=status)
+
+umi_count_file = "../data/retinaAligned.out.cleaned.counts_umi.gz"
+
+
+umi_counts = function(umi_count_file) {
+    plate = tbl_df(read.table(gzfile(umi_count_file), sep="\t"))
+    colnames(plate) = c("umi", "gene", "cell", "counts")
+    byumi = plate %>% group_by(umi) %>% summarise(sum=sum(counts))
+    byumi = subset(byumi, !grepl("N", umi))
+    byumi$umi = as.character(byumi$umi)
+    return(byumi)
+}
+```
+
+# Exploratory analysis
+
+There is not a huge skew in UMI distribution towards G-repeats that we
+have seen with some other libraries, the top UMI tags look pretty
+reasonable:
+
+```{r umi-top-tags, results='asis'}
+umi = umi_counts(umi_count_file)
+umi = umi[order(-umi$sum),]
+kable(head(umi, 25), format="html")
+```
+
+The UMI content is slightly skewed, with UMI with a higher GC content more likely to be
+sequenced:
+
+```{r umi-gc-content}
+umi$G = str_count(umi$umi, "G")
+umi$T = str_count(umi$umi, "T")
+umi$C = str_count(umi$umi, "C")
+umi$A = str_count(umi$umi, "A")
+umi$GC = (umi$G + umi$C) / (umi$G + umi$C + umi$T + umi$A)
+ggplot(umi, aes(as.factor(GC), sum)) + geom_boxplot() + scale_y_log10() +
+  xlab("GC content") +
+  ylab("reads mapped") + 
+  theme_bw(base_size=12, base_family="Gill Sans MT") +
+  theme(panel.grid.major = element_line(size = .5, color = "grey"))
+```
+
+```{r load-counts}
+sort_samplenames = function(samplenames) {
+   sample = unlist(lapply(str_split(samplenames, "[.]"), function(x) {x[1]}))
+   ends = unlist(lapply(str_split(samplenames, "[.]"), function(x) {x[2]}))
+   plate = unlist(lapply(str_split(samplenames, "_"), function(x) {x[1]}))
+   well = unlist(lapply(str_split(samplenames, "_"), function(x) {x[2]}))
+   row = substr(well, 1, 1)
+   plate = as.numeric(substr(well, 2, 3))
+   df = data.frame(id=samplenames, row=row, plate=plate)
+   ord = df[order(df$row, df$plate),]
+   return(as.character(ord$id))
+}
+
+counts_from_umi = function(umi_count_file, tag) {
+    plate = tbl_df(read.table(gzfile(umi_count_file), sep="\t"))
+    colnames(plate) = c("umi", "gene", "cell", "counts")
+    byumi = plate %>% group_by(umi) %>% summarise(sum=sum(counts))
+    umi_to_keep = subset(byumi, !grepl("N", umi))$umi
+    umi_filter = subset(plate, plate$umi %in% umi_to_keep)
+    umi_filter$counts_umi = 1
+    bygene_sample = umi_filter %>% group_by(gene, cell) %>% summarise(sum=sum(counts_umi))
+    bygene_sample = data.frame(bygene_sample)
+    counts = reshape(bygene_sample, timevar = "cell", idvar = "gene", direction = "wide")
+    counts[is.na(counts)] = 0
+    row.names(counts) = counts$gene
+    counts$gene = NULL
+    colnames(counts) = lapply(colnames(counts), function(x) {
+        paste(tag, strsplit(x, 'sum.')[[1]][2], sep=".")})
+    counts = counts[order(rownames(counts)), sort_samplenames(colnames(counts))]
+    return(counts)
+}
+
+umi = counts_from_umi(umi_count_file, "retina")
+colnames(umi) = unname(sapply(colnames(umi), function(x) { strsplit(x, "_")[[1]][2]}))
+metadata$well = colnames(umi)
+metadata$row = substr(colnames(umi), 1, 1)
+```
+
+
+There are only a small number of genes detected in each well.
+```{r genes-detected}
+qplot(colSums(umi > 0)) + geom_histogram() + xlab("genes detected per well") +
+  theme_bw(base_size=12, base_family="Gill Sans MT") +
+  theme(panel.grid.major = element_line(size = .5, color = "grey"))
+```
+
+There are only a small number of counts per well, less than 1000:
+
+```{r counts-per-well}
+summary(colSums(umi))
+qplot(colSums(umi)) + geom_histogram() + xlab("total counts per well") +
+  theme_bw(base_size=12, base_family="Gill Sans MT") +
+  theme(panel.grid.major = element_line(size = .5, color = "grey"))
+```
+
+
+Most detected genes only have a small number of reads associated with them with a large
+number of genes just having one read of evidence.
+
+```{r reads-per-gene}
+qplot(rowSums(umi)) + geom_histogram() + xlab("total reads per gene") +
+  theme_bw(base_size=12, base_family="Gill Sans MT") + scale_x_log10() +
+  theme(panel.grid.major = element_line(size = .5, color = "grey"))
+```
+
+
+The P10 and P13 cells have different distributions of counts which will confound things somewhat:
+
+```{r P10-vs-P13}
+df = data.frame(well=colnames(umi), counts=colSums(umi))
+m = merge(df, metadata, by="well", all.x=TRUE)
+ggplot(m, aes(well, counts)) + geom_bar(stat='identity') + facet_wrap(~ experiment) +
+  ylab("counts per well") +
+  theme_bw(base_size=12, base_family="Gill Sans MT") + 
+  theme(panel.grid.major = element_line(size = .5, color = "grey"),
+        axis.ticks.x = element_blank(), axis.text.x = element_blank())
+```
+
+There isn't really any clustering of the samples based on age or rescue status, which is
+not good if we are hoping to call anything DE.
+```{r mds-plot}
+library(CHBUtils)
+mds(cor(umi), condition=experiment)
+mds(cor(umi), condition=metadata$row)
+```
+
+Hierarchical clustering shows this as well, the colors at the top are the different experiments.
+This data has each gene normalized by the maximum count for that gene.
+
+```{r heatmap}
+exp_colors = data.frame(experiment=c("P10_control", "P10_rescue", "P13_control", "P13_rescue"),
+                        colors=c("blue", "red", "yellow", "green"))
+colors = merge(metadata, exp_colors, by="experiment", all.x=TRUE)
+
+m = as.matrix(umi)
+heatmap(m/apply(m,1,max),zlim=c(0,1),col=gray.colors(100),Rowv=NA,labRow=NA,scale="none",ColSideColors=as.character(colors$colors))
+```
+
+# Differential expression
+Based on the above we shouldn't really be expecting there to be any differences. I
+tried running SCDE for all the samples, P10 vs P13 and rescue vs control and neither
+came out as anything. I also treated P10 and P13 as a batch effect and looked at the
+effect of rescue vs control and couldn't find anything either.
+
+```{r P10-P13-de}
+library(scde)
+
+scde_count_prep = function(counts, groups, batch=NULL, sample_min=5000, sample_max=Inf) {
+    keep_genes = rowSums(counts) > 0
+    keep_samples = (colSums(counts) > sample_min) & (colSums(counts) < sample_max)
+    groups = droplevels(groups[keep_samples])
+    counts = counts[keep_genes, keep_samples]
+    names(groups) = colnames(counts)
+    if(!any(unlist(lapply(batch, is.na)))) {
+       batch = droplevels(batch[keep_samples])
+       names(batch) = colnames(counts)
+    }
+    return(list(counts=counts, groups=groups, batch=batch))
+}
+
+
+scde_de = function(scde) {
+    o.ifm = scde.error.models(counts=scde$counts, groups=scde$groups, n.cores=1,
+        threshold.segmentation=TRUE,save.crossfit.plots=FALSE,save.model.plots=FALSE,verbose=2)
+    valid.cells = o.ifm$corr.a > 0
+    o.ifm = o.ifm[valid.cells,]
+    groups = scde$groups[valid.cells]
+    names(groups) = row.names(o.ifm)
+    if(!any(unlist(lapply(scde$batch, is.na)))) {
+       batch = scde$batch[valid.cells]
+       names(batch) = row.names(o.ifm)
+    }
+    counts = scde$counts[,valid.cells]
+    o.prior = scde.expression.prior(models=o.ifm,counts=scde$counts,
+        length.out=400,show.plot=T)
+    ediff = scde.expression.difference(o.ifm,scde$counts,o.prior,groups=groups,
+        batch=batch, n.randomizations=100, verbose=1)
+    if(!any(unlist(lapply(scde$batch, is.na)))) {
+       ediff = ediff$batch.adjusted
+    }
+
+    ediff$pvalue = pnorm(-(abs(ediff$Z))) * 2
+    ediff$padj = p.adjust(ediff$pvalue)
+    return(ediff)
+}
+```
+
+```{r differential-expression}
+s = scde_count_prep(umi, metadata$status, metadata$age, 1000, 20000)
+d = scde_de(s)
+table(d$padj < 0.05)
+```
