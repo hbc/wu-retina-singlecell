@@ -17,6 +17,7 @@ library(extrafont)
 library(stringr)
 library(ggplot2)
 library(dplyr)
+library(gplots)
 
 # remove scientific notation unless the numbers get really big
 options(scipen=5)
@@ -220,4 +221,166 @@ scde_de = function(scde) {
 s = scde_count_prep(umi, metadata$status, metadata$age, 1000, 20000)
 d = scde_de(s)
 table(d$padj < 0.05)
+```
+
+```{r bulk-data-setup}
+library(reshape)
+combined = read.table("../data/bulk/annotated_combined.counts", sep="\t", header=TRUE)
+combined$symbol = toupper(combined$symbol)
+summarydata = read.table("../data/bulk/project-summary.csv", sep=",", header=TRUE)
+
+load_gene_list = function(in_fn) {
+  gene_list = read.table(in_fn, header=FALSE)
+  colnames(gene_list) = "symbol"
+  gene_list$symbol = toupper(gene_list$symbol)
+  return(gene_list)
+}
+missing_genes = function(x, known) {
+   return(x[!toupper(x$symbol) %in% toupper(known$symbol),])
+}
+
+symbols_to_ensembl = function(x) {
+   require(biomaRt)
+   mart = useMart(biomart="ensembl", dataset="mmusculus_gene_ensembl")
+   x = getBM(mart, filters="mgi_symbol",
+             attributes=c("mgi_symbol", "ensembl_gene_id"), values=x)
+   return(x)
+}
+
+unigene_to_ensembl = function(x) {
+   require(biomaRt)
+   mart = useMart(biomart="ensembl", dataset="mmusculus_gene_ensembl")
+   x = getBM(mart, filters="unigene",
+             attributes=c("unigene", "mgi_symbol", "ensembl_gene_id"), values=x)
+   return(x)
+}
+
+get_go_terms = function() {
+   require(biomaRt)
+   mart = useMart(biomart="ensembl", dataset="mmusculus_gene_ensembl")
+   x = getBM(mart=mart, attributes=c("ensembl_gene_id", "mgi_symbol", "go_id", 
+                                "name_1006"))
+   return(x)
+}
+
+go_terms = get_go_terms()
+apoptosis_list = go_terms[grepl("apopto", go_terms$name_1006),]
+colnames(apoptosis_list) = c("id", "symbol")
+housekeeping_list = read.table("../metadata/housekeeping.txt")
+colnames(housekeeping_list) = c("unigene")
+housekeeping_list = unigene_to_ensembl(housekeeping_list$unigene)
+colnames(housekeeping_list) = c("unigene", "symbol", "id")
+
+rod_gene_list = read.table("../metadata/rod_gene_list.txt", header=TRUE)
+glycolysis_list = read.table("../metadata/glycolysis.txt", header=TRUE, sep="\t")
+calcium_list = read.table("../metadata/calcium_signaling_pathway.txt", header=TRUE, sep="\t")
+nrf2_list = read.table("../metadata/oxstressnrf2.txt", header=TRUE, sep="\t")
+hif1_list = read.table("../metadata/hif1a.txt", header=TRUE, sep="\t")
+oxidative_list = read.table("../metadata/oxidative_stress.txt", sep="\t", header=TRUE)
+
+normalize_bulk_counts = function(counts) {
+    library(edgeR)
+    counts = combined
+    rownames(counts) = counts$id
+    counts$id = NULL
+    counts$symbol = NULL
+    y = DGEList(counts=counts)
+    y = calcNormFactors(y)
+    counts = cpm(y, normalized.lib.sizes=TRUE)
+    col_order = order(colnames(counts))
+    counts = counts[, col_order]
+    return(counts)
+}
+counts = normalize_bulk_counts(combined)
+
+umi_col_order = order(colnames(umi))
+umi = umi[, umi_col_order]
+
+make_bulk_heatmap = function(counts, gene_list, cexRow=0.6, cexCol=0.6, title='') {
+    gene_list = unique(gene_list[, c("id", "symbol")])
+    rownames(gene_list) = gene_list$id
+    mat = as.matrix(subset(counts, rownames(counts) %in% gene_list$id))
+    mat = as.matrix(mat)
+    mat = sqrt(mat)
+    
+    rownames(mat) = gene_list[rownames(mat),]$symbol
+    pheatmap(mat, col=grey(seq(1,0,-0.01)), cluster_cols=FALSE,
+             cluster_rows=FALSE, main=title)
+}
+
+make_singlecell_heatmap = function(counts, gene_list, cexRow=0.6, cexCol=0.6, title='') {
+    gene_list = unique(gene_list[, c("id", "symbol")])
+    rownames(gene_list) = gene_list$id
+    mat = as.matrix(subset(counts, rownames(counts) %in% gene_list$id))
+    mat = as.matrix(mat)
+    mat = sqrt(mat)
+    rownames(mat) = gene_list[rownames(mat),]$symbol
+    pheatmap(mat, col=grey(seq(1,0,-0.01)), cluster_cols=FALSE, show_colnames=FALSE,
+             cluster_rows=FALSE, main=title)
+}
+```
+
+## Rod genes
+```{r make-rod-plots}
+make_bulk_heatmap(counts, rod_gene_list, title='Square root of bulk counts for rod genes')
+make_singlecell_heatmap(umi, rod_gene_list, title='Square root of single cell counts for rod genes')
+```
+
+## Apoptosis genes
+```{r make-apoptosis-plots}
+make_bulk_heatmap(counts, apoptosis_list, title='Square root of bulk counts for apoptosis genes')
+make_singlecell_heatmap(umi, apoptosis_list, title='Square root of single cell counts for apoptosis genes')
+```
+
+## Housekeeping genes
+```{r make-housekeeping-plots}
+make_bulk_heatmap(counts, housekeeping_list, title='Square root of bulk counts for housekeeping genes')
+make_singlecell_heatmap(umi, housekeeping_list, title='Square root of single cell counts for housekeeping genes')
+```
+
+## Glycolysis genes
+```{r make-glycolysis-plots}
+make_bulk_heatmap(counts, glycolysis_list, title='Square root of bulk counts for glycolysis genes')
+make_singlecell_heatmap(umi, glycolysis_list, title='Square root of single cell counts for glycolysis genes')
+```
+
+## Calcium genes
+```{r make-calcium-plots}
+make_bulk_heatmap(counts, calcium_list, title='Square root of bulk counts for calcium genes')
+make_singlecell_heatmap(umi, calcium_list, title='Square root of single cell counts for calcium genes')
+```
+
+## Nrf2
+```{r make-nrf2-plots}
+make_bulk_heatmap(counts, nrf2_list, title='Square root of bulk counts for nrf2 genes')
+make_singlecell_heatmap(umi, nrf2_list, title='Square root of single cell counts for nrf2 genes')
+```
+
+## Hif1
+```{r make-hif1-plots}
+make_bulk_heatmap(counts, hif1_list, title='Square root of bulk counts for hif1 genes')
+make_singlecell_heatmap(umi, hif1_list, title='Square root of single cell counts for hif1 genes')
+```
+
+## Oxidative genes
+```{r make-oxidative-genes}
+make_bulk_heatmap(counts, oxidative_list, title='Square root of bulk counts for oxidative genes')
+make_singlecell_heatmap(umi, oxidative_list, title='Square root of single cell counts for oxidative genes')
+```
+
+```{r write-tables}
+write_tables = function(l, bulk, sc, name) {
+  write.table(subset(bulk, id %in% l$id), file=paste(name, "_bulk.tsv", sep=""),
+                     quote=FALSE, col.names=TRUE)
+  write.table(subset(sc, rownames(sc) %in% l$id), file=paste(name, "_singlecell.tsv", sep=""),
+                     quote=FALSE, col.names=TRUE)
+}
+counts_table = as.data.frame(counts)
+counts_table$id = rownames(counts)
+m = merge(counts_table, combined[, c("id", "symbol")], by="id", all.x=TRUE)
+write.table(m, file="bulk_counts.tsv", sep="\t", quote=FALSE, col.names=TRUE)
+umi_table = as.data.frame(umi)
+umi_table$id = rownames(umi)
+m = merge(umi_table, combined[, c("id", "symbol")], by="id", all.x=TRUE)
+write.table(m, file="umi_counts.tsv", sep="\t", quote=FALSE, col.names=TRUE)
 ```
