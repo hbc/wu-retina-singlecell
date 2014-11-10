@@ -292,11 +292,18 @@ normalize_bulk_counts = function(counts) {
     return(counts)
 }
 counts = normalize_bulk_counts(combined)
-
+lookup = metadata[, c("experiment", "well")]
+rownames(lookup) = lookup$well
+umi_col_names = lookup[colnames(umi),]$experiment
+colnames(umi) = umi_col_names
 umi_col_order = order(colnames(umi))
 umi = umi[, umi_col_order]
 
-make_bulk_heatmap = function(counts, gene_list, cexRow=0.6, cexCol=0.6, title='') {
+library(pheatmap)
+annotation = data.frame(experiment=umi_col_names[order(umi_col_names)])
+rownames(annotation) = colnames(umi)
+make_bulk_heatmap = function(counts, gene_list, cexRow=0.6, cexCol=0.6, title='',
+                             fontsize_row=8) {
     gene_list = unique(gene_list[, c("id", "symbol")])
     rownames(gene_list) = gene_list$id
     mat = as.matrix(subset(counts, rownames(counts) %in% gene_list$id))
@@ -305,10 +312,11 @@ make_bulk_heatmap = function(counts, gene_list, cexRow=0.6, cexCol=0.6, title=''
     
     rownames(mat) = gene_list[rownames(mat),]$symbol
     pheatmap(mat, col=grey(seq(1,0,-0.01)), cluster_cols=FALSE,
-             cluster_rows=FALSE, main=title)
+             cluster_rows=FALSE, main=title, fontsize_row=fontsize_row)
 }
 
-make_singlecell_heatmap = function(counts, gene_list, cexRow=0.6, cexCol=0.6, title='') {
+make_singlecell_heatmap = function(counts, gene_list, cexRow=0.6, cexCol=0.6, title='',
+                                   fontsize_row=8) {
     gene_list = unique(gene_list[, c("id", "symbol")])
     rownames(gene_list) = gene_list$id
     mat = as.matrix(subset(counts, rownames(counts) %in% gene_list$id))
@@ -316,7 +324,8 @@ make_singlecell_heatmap = function(counts, gene_list, cexRow=0.6, cexCol=0.6, ti
     mat = sqrt(mat)
     rownames(mat) = gene_list[rownames(mat),]$symbol
     pheatmap(mat, col=grey(seq(1,0,-0.01)), cluster_cols=FALSE, show_colnames=FALSE,
-             cluster_rows=FALSE, main=title)
+             fontsize_row=fontsize_row,
+             cluster_rows=FALSE, main=title, annotation=annotation)
 }
 ```
 
@@ -340,13 +349,15 @@ make_singlecell_heatmap(umi, housekeeping_list, title='Square root of single cel
 
 ## Glycolysis genes
 ```{r make-glycolysis-plots}
-make_bulk_heatmap(counts, glycolysis_list, title='Square root of bulk counts for glycolysis genes')
+make_bulk_heatmap(counts, glycolysis_list, title='Square root of bulk counts for glycolysis genes',
+                  fontsize_row=4)
 make_singlecell_heatmap(umi, glycolysis_list, title='Square root of single cell counts for glycolysis genes')
 ```
 
 ## Calcium genes
 ```{r make-calcium-plots}
-make_bulk_heatmap(counts, calcium_list, title='Square root of bulk counts for calcium genes')
+make_bulk_heatmap(counts, calcium_list, title='Square root of bulk counts for calcium genes',
+                  fontsize_row=3)
 make_singlecell_heatmap(umi, calcium_list, title='Square root of single cell counts for calcium genes')
 ```
 
