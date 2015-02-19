@@ -1,0 +1,310 @@
+---
+  html_document:
+    toc: true
+    highlight: zenburn
+    theme: united
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(tidy=TRUE, highlight=TRUE, dev="png",
+               cache=TRUE, highlight=TRUE, autodep=TRUE, warning=FALSE, error=FALSE,
+               message=FALSE, prompt=TRUE, comment='', fig.cap='')
+```
+### Background
+A-G 1-24 Central Rods with HDAC4
+H-P 1-24 Peripheral Rods with HDAC4
+
+A-G are cells from one part of the retina and H-P are from cells in a
+different part of the retina. We know the peripheral ones are more
+resistant to death, but no one knows why that is. So the interesting
+biological question is what genes if any are different between the two
+populations. For the scrb-seq data, the questions we are asking for
+are…
+
+
+1. Are there any genes or groups of genes with differences between A-G and H-P?
+(and if there aren't, is it because there are too few reads per cells/genes detected)
+
+2. Do all of these cells look like rod photoreceptors?
+i.e. do they express the appropriate rod genes, and not too many
+muller glia, rpe, or cone genes (I attached lists of genes thought to
+be enriched in rods [2 different ones], muller glia enriched genes,
+rpe enriched genes, cone enriched genes, and rod bipolar cell enriched
+genes)
+
+3. How much diversity is there in photoreceptors?  Mostly people have always
+envisioned the photoreceptors to be the same, but no one has really looked at
+the single cell level before.  If we look at common housekeepers, how much
+variability is there?
+(I attached a list of housekeepers)
+
+4. Because this was a trial run, I think Magali actually dumped the equivalent
+of 384x3 (1152) cells into a single sequencing lane.
+Is there any way to know that if we
+repeated the experiment, but with fewer cells,
+whether the level of detection of the genes would improve?
+
+### Are there groups of genes with differences between A-G and H-P?
+First load in the counts and make a heatmap of the correlation between the
+two sample groups.
+
+```{r load-counts}
+library(dplyr)
+library(ggplot2)
+library(pheatmap)
+library(knitr)
+library(reshape)
+counts_file = "~/cache/wu-retina-singlecell/counts/scrb-trimarchi/Cepko_Trimarchi_buffer.all.refseq.total.dat"
+counts = read.table(counts_file, header=TRUE, sep="\t", row.names=1, stringsAsFactors=FALSE)
+```
+
+We can see they kind of cluster into separate groups, with the fovea samples with a higher
+correlation with each other.
+
+```{r correlaton-heatmap}
+fovea = c("A", "B", "C", "D", "E", "F", "G")
+well = unlist(lapply(colnames(counts), function(x) strsplit(x, "_")[[1]][2]))
+row = substr(well, 1, 1)
+class = unlist(lapply(row, function(x) ifelse(x %in% fovea, "fovea", "periphery")))
+class_df = data.frame(class=class)
+dat = cor(counts)
+rownames(class_df) = rownames(dat)
+class_colors = c("yellow", "purple")
+names(class_colors) = c("fovea", "periphery")
+pheatmap(dat, annotation_colors=list(class=class_colors), annotation=class_df,
+    show_rownames=FALSE, show_colnames=FALSE, cluster_rows=FALSE)
+```
+
+These samples have a really low number of counts, about 20k counts per sample. This is
+going to make it difficult to do any kind of differential expression analysis.
+
+Papers like this have a million or more: http://www.nature.com/nmeth/journal/v11/n2/extref/nmeth.2772-S1.pdf
+
+```{r counts-per-sample}
+qplot(colSums(counts)) + geom_histogram() + scale_x_sqrt() + scale_y_sqrt()
+```
+
+Remove genes that are never detected and remove wells with very poor coverage.
+```{r differential-expression-setup}
+library(DESeq)
+library(scde)
+counts = counts[rowSums(counts) > 0,]
+counts = counts[,colSums(counts)> 10000]
+well = unlist(lapply(colnames(counts), function(x) strsplit(x, "_")[[1]][2]))
+row = substr(well, 1, 1)
+class = unlist(lapply(row, function(x) ifelse(x %in% fovea, "fovea", "periphery")))
+class_df = data.frame(class=class)
+```
+
+
+Clustering the samples and genes shows there is not too much of a pattern going on between
+
+
+```{r gene-heatmap}
+pheatmap(sqrt(sqrt(counts)), annotation_colors=list(class=class_colors), annotation=class_df,
+    show_rownames=FALSE, show_colnames=FALSE, cluster_rows=FALSE)
+```
+
+```{r differential-run}
+well = unlist(lapply(colnames(counts), function(x) strsplit(x, "_")[[1]][2]))
+row = substr(well, 1, 1)
+class = unlist(lapply(row, function(x) ifelse(x %in% fovea, "fovea", "periphery")))
+class = as.factor(class)
+names(class) = colnames(counts)
+class = as.factor(class)
+o.ifm = scde.error.models(counts=counts, groups=class, save.crossfit.plots=F,
+   n.cores=1, threshold.segmentation=T, save.model.plots=F, verbose=0)
+valid.cells <- o.ifm$corr.a >0;
+o.ifm = o.ifm[valid.cells,]
+counts = counts[, valid.cells]
+class = class[valid.cells]
+o.prior <- scde.expression.prior(models=o.ifm,counts=counts, length.out=400,show.plot=T)
+```
+
+```{r differential-expression, results='asis'}
+ediff = scde.expression.difference(o.ifm, counts, o.prior, groups=class, n.randomizations=100,
+                                   n.cores=1, verbose=0)
+ediff$pvalue = pnorm(-(abs(ediff$Z))) * 2
+ediff$padj = p.adjust(ediff$pvalue)
+ediff = ediff[order(ediff$pvalue),]
+kable(subset(ediff, padj < 0.20), format="markdown")
+```
+
+We can find a few differentially expressed genes between the peripheral/fovea cells. The trouble is we see Tsix and Xist, which are two genes that are sex-specific, so we might be looking at sex specific differences here rather than retina/peripheral differences. Xist serves to deactivate the extra X chromosome in females.
+
+```{r xist-plot}
+xist = melt(counts[rownames(counts) == "Xist",])
+xist$class = class
+ggplot(xist, aes(class, value)) + geom_boxplot() + scale_y_sqrt() + xlab("")
+```
+
+At any rate we can output a list of the top 100 genes by p-value; just because things aren't
+significantly different doesn't mean you can't follow up on hits that you prioritize. It
+just means if you wanted to publish this you'd likely have to do some kind of follow up
+experiment and not just publish the list, though there can be exceptions.
+
+```{r de-output}
+write.table(head(ediff, 100), file="fovea-periphery.tsv", sep="\t", quote=FALSE,
+  col.names=TRUE, row.names=TRUE)
+```
+
+We can't really tell if there was more reads if we would do a better job calling differentially
+expressed genes, we can do it the other way by downsampling when we know we have enough and
+look and see where the results fall off, but can't really do the reverse.
+
+The take home of this, though is the mice should be sexxed prior to doing this, because we're
+picking up sex specific genes.
+
+### Are these rod photoreceptors?
+
+```{r rod-and-cones}
+rod = c("Rho","Sag","Pdc","Gnat1","Pde6g","Rom1","Gngt1","Unc119",
+        "Gnb1","Gcap1","Guca1a","Pde6b","Guca2a","Prph2","Aipl1",
+        "Tulp1","Rs1","Rcvrn","Cngb1")
+roska_cone = c("Pde6c","Opn1sw","Fabp7","Gnat2","Opn1mw","Pde6h","Clca3",
+              "Clca3","Clca3","Agr2","Arr3","Gulo","Otop3","Ppm1j","Mogat1","Mogat1",
+              "Osgep","Ppp1r14d","Cngb3","Igj","1700113O17Rik","Gngt2","En2","Rbp3",
+              "Rbp3","Lcn2","Acbd6")
+roska_rod = c("Pde6b","Nr2e3","Cnga1","Pde6a","A930006D01Rik","Rp1","Cyld","Sh2d1a","Guca1b","Faim","Gm12689","Gm12689","Gnb1","Fscn2","Reep6","Nxnl2","Nxnl1","Nrl","Gm13251","Gm13251","1700020D05Rik","Spata1","Olfr772","Slc24a1","Ybx3","Gm9958","Gm9958","Rex2","Rexo2","Ppap2c","Hmgb2")
+rod_indexes = rownames(counts) %in% rod | rownames(counts) %in% roska_rod
+cone_indexes = rownames(counts) %in% roska_cone
+```
+
+Below is a heatmap of the rod and cone genes, the samples are on the Y axis and the genes on
+the X axis. The units are the raw counts to the fourth root, to compress onto the scale.
+
+```{r rod-and-cone-heatmap}
+anno = data.frame(type=ifelse(rod_indexes & cone_indexes, "both", ifelse(rod_indexes, "rod",
+ ifelse(cone_indexes, "cone", "none"))))
+rownames(anno) = rownames(counts)
+
+a = subset(anno, type != "none")
+
+pheatmap(t(sqrt(sqrt(counts[cone_indexes | rod_indexes,]))), show_colnames=TRUE, cluster_rows=TRUE, annotation=a, show_rownames=FALSE)
+```
+
+Hard to tell if these are cones or rods; there are some cone markers that are expressed
+at a pretty good clip but there is a set of rod markers enriched as well.
+
+### Diversity in photoreceptors?
+I don't think the variability isn't going to tell you too much,
+because there is variability just due to whether or not the mRNA are
+captured for sequencing at all with single cell RNA-seq. Below is a
+heatmap of the housekeeping genes, with the counts normalized to the
+total number of counts for that cell. You can see the number of genes
+detected correlates the overall number of reads in each cell, and that
+in turn has a correlation to the normalized depth of the housekeeping
+genes. The presence/absence of the housekeeping genes says more about
+the variation in sequencing than the samples.
+
+```{r variation-heatmap}
+normcounts = counts / colSums(counts)
+housekeeping = c("Prpf4b","Ndfip1","Gpx1","Polr2a","Rps27a","Rpl13a","Mapk6","Eif2s1","Sin3b","Tfr2","Polr2g","Ywhae","Rps3","Tbp","Gyk","Hmbs","Vim","Pfkp","Aldoa","Rpl11","Nono","Cdca8","Tfrc","Gm13105","Alas1","Sbk1","Hprt","Arhgdia","Gapdh","Slc25a12","Ubc","Eef1a1","Dvl1","Ctxn1","G6pd2","Hint1","Rps15","Tpm2","Tubb4a")
+col_totals = data.frame(depth=colSums(counts), detected=colSums(counts > 0))
+rownames(col_totals) = colnames(normcounts)
+pheatmap(normcounts[rownames(normcounts) %in% housekeeping,], show_colnames=FALSE, cluster_rows=TRUE, show_rownames=TRUE, annotation=col_totals, drop_levels=FALSE)
+```
+
+#### Is there more variation in the photoreceptor genes compared to the housekeeping genes?
+
+As a dirty way of checking it, calculate the CV for the photoreceptor and housekeeping genes,
+then do a t.test.
+
+```{r cv-test}
+photo_cv = apply(counts[cone_indexes | rod_indexes,], 1, sd) / apply(counts[cone_indexes | rod_indexes,], 1, mean)
+house_cv = apply(counts[housekeeping,], 1, sd) / apply(counts[housekeeping,], 1, mean)
+t.test(photo_cv, house_cv)
+```
+
+#### What are the genes with the highest variation?
+
+We fit a line to the mean vs coefficient of variation plot and find the 100 genes
+which deviate the most from the calculated CV. These are genes that are much more
+highly variable than expected.
+
+```{r cv-fit}
+require(DESeq)
+lib.size <- estimateSizeFactorsForMatrix(counts)
+ed <- t(t(counts)/lib.size)
+
+vars <- apply(ed,1,var)
+means <- rowMeans(ed)
+cv2 <- vars/means^2
+require(statmod)
+minMeanForFit <- unname( quantile( means[ which( cv2 > .3 ) ], .95 ) )
+useForFit <- means >= minMeanForFit # & spikeins
+fit <- glmgam.fit( cbind( a0 = 1, a1tilde = 1/means[useForFit] ),cv2[useForFit] )
+a0 <- unname( fit$coefficients["a0"] )
+a1 <- unname( fit$coefficients["a1tilde"])
+fit$coefficients
+par(mar=c(3.5,3.5,1,1),mgp=c(2,0.65,0),cex=0.9); smoothScatter(log(means),log(cv2));
+xg <- exp(seq( min(log(means[means>0])), max(log(means)), length.out=1000 ))
+vfit <- a1/xg + a0
+# add fit line
+df <- ncol(ed) - 1
+# add confidence interval
+afit <- a1/means+a0
+varFitRatio <- vars/(afit*means^2)
+varorder <- order(varFitRatio,decreasing=T)
+oed <- ed[varorder,]
+par(mar=c(3.5,3.5,1,1),mgp=c(2,0.65,0),cex=0.9); smoothScatter(log(means),log(cv2)); lines( log(xg), log(vfit), col="black", lwd=3 ); lines(log(xg),log(vfit * qchisq(0.975,df)/df),lty=2,col="black"); lines(log(xg),log(vfit * qchisq(0.025,df)/df),lty=2,col="black");
+# add top 100 genes
+points(log(means[varorder[1:100]]),log(cv2[varorder[1:100]]),col=2)
+```
+
+This identifies a set of genes that are more variable than expected:
+
+```{r variance-set}   
+pval <- pchisq(varFitRatio*df,df=df,lower.tail=F)
+adj.pval <- p.adjust(pval,"fdr")
+sigVariedGenes <- adj.pval<1e-3;
+table(sigVariedGenes)
+sig_list = adj.pval[sigVariedGenes & !is.na(sigVariedGenes)]
+sig_varied = data.frame(padj=sig_list)
+rownames(sig_varied) = names(sig_list)
+write.table(sig_varied, file="significant_variation.tsv", sep="\t",
+ col.names=TRUE, row.names=TRUE, quote=FALSE)
+```
+
+Are any of these photoreceptor or housekeeping genes?
+```{r photoreceptor-and-housekeeping-variance, results='asis'}
+photoreceptor = c(rod, roska_cone, roska_rod)
+sig_varied$id = rownames(sig_varied)
+```
+
+photoreceptors:
+```{r photoreceptor-variance}
+photoreceptor_varied = sig_varied[rownames(sig_varied) %in% photoreceptor,]
+kable(sig_varied[rownames(sig_varied) %in% photoreceptor,], format='markdown')
+```
+housekeeping:
+```{r housekeeping-variance}
+housekeeping_varied = sig_varied[rownames(sig_varied) %in% housekeeping,]
+kable(sig_varied[rownames(sig_varied) %in% housekeeping,], format='markdown')
+```
+
+Are these driven by a small number of outlier samples or is there just more overall
+variation for the photoreceptor genes?
+
+```{r housekeeping-variance-heatmap}
+pheatmap(normcounts[rownames(normcounts) %in% photoreceptor_varied$id,], show_colnames=FALSE, cluster_rows=TRUE, show_rownames=TRUE, annotation=col_totals, drop_levels=FALSE)
+```
+
+It looks like there are a small number of samples that have high expression of these genes.
+
+### Wrapup
+
+1. We identified some DE genes, but it looks like there might be a gender bias that is
+   swamping the signal.
+2. It is up in the air if these look like rod photoreceptors or not, there are some cone
+   markers expressed and photoreceptor markers expressed in the samples.
+3. The primary driver of variability is overall number of reads and number of genes detected.
+If we normalize the counts to total number of reads, we still see that the number of
+reads and genes detected correlates to the expression of housekeeping genes. We did some
+dirty measures of measuring variation and found that there might be a couple of photoreceptor
+genes that might vary between individual cells, but the low count rate makes it hard to
+know for sure.
+4. We can't answer if sequencing deeper would help. We only pick up at most 3.5k genes,
+and for some samples even less than that, so for many samples we're not seeing the
+genes at all. Is that due to incomplete capturing of the mRNA or not sequencing deep
+enough? We can't really tell.
