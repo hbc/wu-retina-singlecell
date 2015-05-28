@@ -73,6 +73,8 @@ class_colors = c("yellow", "purple")
 names(class_colors) = c("fovea", "periphery")
 pheatmap(dat, annotation_colors=list(class=class_colors), annotation=class_df,
     show_rownames=FALSE, show_colnames=FALSE, cluster_rows=FALSE)
+pheatmap(dat, annotation_colors=list(class=class_colors), annotation=class_df,
+    show_rownames=FALSE, show_colnames=FALSE, cluster_rows=TRUE)
 ```
 
 These samples have a really low number of counts, about 20k counts per sample. This is
@@ -101,7 +103,7 @@ Clustering the samples and genes shows there is not too much of a pattern going 
 
 
 ```{r gene-heatmap}
-pheatmap(sqrt(sqrt(counts)), annotation_colors=list(class=class_colors), annotation=class_df,
+pheatmap(sqrt(counts), annotation_colors=list(class=class_colors), annotation=class_df,
     show_rownames=FALSE, show_colnames=FALSE, cluster_rows=FALSE)
 ```
 
@@ -165,13 +167,17 @@ roska_cone = c("Pde6c","Opn1sw","Fabp7","Gnat2","Opn1mw","Pde6h","Clca3",
               "Clca3","Clca3","Agr2","Arr3","Gulo","Otop3","Ppm1j","Mogat1","Mogat1",
               "Osgep","Ppp1r14d","Cngb3","Igj","1700113O17Rik","Gngt2","En2","Rbp3",
               "Rbp3","Lcn2","Acbd6")
-roska_rod = c("Pde6b","Nr2e3","Cnga1","Pde6a","A930006D01Rik","Rp1","Cyld","Sh2d1a","Guca1b","Faim","Gm12689","Gm12689","Gnb1","Fscn2","Reep6","Nxnl2","Nxnl1","Nrl","Gm13251","Gm13251","1700020D05Rik","Spata1","Olfr772","Slc24a1","Ybx3","Gm9958","Gm9958","Rex2","Rexo2","Ppap2c","Hmgb2")
-rod_indexes = rownames(counts) %in% rod | rownames(counts) %in% roska_rod
+rod = c(rod, "Pde6b","Nr2e3","Cnga1","Pde6a","A930006D01Rik","Rp1","Cyld","Sh2d1a","Guca1b","Faim","Gm12689","Gm12689","Gnb1","Fscn2","Reep6","Nxnl2","Nxnl1","Nrl","Gm13251","Gm13251","1700020D05Rik","Spata1","Olfr772","Slc24a1","Ybx3","Gm9958","Gm9958","Rex2","Rexo2","Ppap2c","Hmgb2")
+col_totals = data.frame(depth=colSums(counts), detected=colSums(counts > 0))
+rownames(col_totals) = colnames(counts)
+col_totals = col_totals[order(col_totals$depth),]
+counts = counts[, rownames(col_totals)]
+rod_indexes = rownames(counts) %in% rod
 cone_indexes = rownames(counts) %in% roska_cone
 ```
 
 Below is a heatmap of the rod and cone genes, the samples are on the Y axis and the genes on
-the X axis. The units are the raw counts to the fourth root, to compress onto the scale.
+the X axis. The units are the square root of the raw counts, to compress onto the scale.
 
 ```{r rod-and-cone-heatmap}
 anno = data.frame(type=ifelse(rod_indexes & cone_indexes, "both", ifelse(rod_indexes, "rod",
@@ -180,29 +186,39 @@ rownames(anno) = rownames(counts)
 
 a = subset(anno, type != "none")
 
-pheatmap(t(sqrt(sqrt(counts[cone_indexes | rod_indexes,]))), show_colnames=TRUE, cluster_rows=TRUE, annotation=a, show_rownames=FALSE)
+pheatmap(t(sqrt(counts[cone_indexes | rod_indexes,])), show_colnames=TRUE, cluster_rows=TRUE, annotation=a, show_rownames=FALSE)
 ```
 
 Hard to tell if these are cones or rods; there are some cone markers that are expressed
 at a pretty good clip but there is a set of rod markers enriched as well.
 
+
 ### Diversity in photoreceptors?
 I don't think the variability isn't going to tell you too much,
 because there is variability just due to whether or not the mRNA are
 captured for sequencing at all with single cell RNA-seq. Below is a
-heatmap of the housekeeping genes, with the counts normalized to the
-total number of counts for that cell. You can see the number of genes
+heatmap of the housekeeping genes, ordered by the total number of
+counts for the sample. You can see the number of genes
 detected correlates the overall number of reads in each cell, and that
-in turn has a correlation to the normalized depth of the housekeeping
+in turn has a correlation to the depth of the housekeeping
 genes. The presence/absence of the housekeeping genes says more about
-the variation in sequencing than the samples.
+the variation in sequencing than the samples than the content of the cells.
 
-```{r variation-heatmap}
-normcounts = counts / colSums(counts)
+First a replot of the cone/rod genes using normalized counts so we can compare.
+
+Below is the same
+heatmap, but using the normalized counts, since we use that below to look at glia/other
+enrichment:
+
+```{r rod-heatmap}
 housekeeping = c("Prpf4b","Ndfip1","Gpx1","Polr2a","Rps27a","Rpl13a","Mapk6","Eif2s1","Sin3b","Tfr2","Polr2g","Ywhae","Rps3","Tbp","Gyk","Hmbs","Vim","Pfkp","Aldoa","Rpl11","Nono","Cdca8","Tfrc","Gm13105","Alas1","Sbk1","Hprt","Arhgdia","Gapdh","Slc25a12","Ubc","Eef1a1","Dvl1","Ctxn1","G6pd2","Hint1","Rps15","Tpm2","Tubb4a")
-col_totals = data.frame(depth=colSums(counts), detected=colSums(counts > 0))
-rownames(col_totals) = colnames(normcounts)
-pheatmap(normcounts[rownames(normcounts) %in% housekeeping,], show_colnames=FALSE, cluster_rows=TRUE, show_rownames=TRUE, annotation=col_totals, drop_levels=FALSE)
+pheatmap(sqrt(counts[rod_indexes | cone_indexes,]), show_colnames=FALSE, cluster_rows=TRUE, show_rownames=TRUE, cluster_cols=FALSE, annotation=col_totals)
+```
+
+And now of the housekeeping genes:
+
+```{r norm-housekeeping-heatmap}
+pheatmap(sqrt(counts[rownames(counts) %in% housekeeping,]), show_colnames=FALSE, cluster_rows=TRUE, show_rownames=TRUE, annotation=col_totals, drop_levels=FALSE, cluster_cols=FALSE)
 ```
 
 #### Is there more variation in the photoreceptor genes compared to the housekeeping genes?
@@ -215,6 +231,24 @@ photo_cv = apply(counts[cone_indexes | rod_indexes,], 1, sd) / apply(counts[cone
 house_cv = apply(counts[housekeeping,], 1, sd) / apply(counts[housekeeping,], 1, mean)
 t.test(photo_cv, house_cv)
 ```
+
+#### Is there any glial/rpe cell contamination?
+```{r glial-rpe-contamination}
+glia=c("Apoe","Aqp4","Clu","Vim","Kcnj2","Kcnj12","Kcnj10","S100a16","Glul","Rlbp1","Dkk3","Vsx2","Spc25","Itm2b","Atg4b","Dbi","Tspo","Gpr37","Car2","Abca8a","Sox2","Gnai2","Cav2","Car5a","Cav1","Jagn1","Dapl1","Synpr","Col9a1","Gm5771","Prss3","2210010C04Rik","Gm10334","Prss1","Prss2","Uba3","Gnb1l","Wdr46","Kcnj10","","Ctsh","Rhpn1")
+rpe = c("Rpe65","Ttr","Crx","Dct","Best1","Six3","Chrna3","Trpm1","Lhx2","Sfrp5","Pmel","Cspg5","Aplp1","Pdxp","Arid4a","Rbp1","Tyrp1","Myrip","Tfpi2","Mab21l1","Ptgds","Frzb","Slc6a15","Serpinf1","Dusp4","Gmnn","Gem","Bmp4","Slc6a20a","Slc6a20b","Cdo1","Ttll4","Cdh15","Cdh3","Aldh1a3","Clcn4-2","Enpp2","Col8a2","Gpr143","Sostdc1","Pdpn","Gpnmb","Sorbs2","Sulf1","Efemp1","Foxd1","Lnx1","Mpdz","Sdc2","Gja1","Limch1","Fgfr2","Plcb4","Gas1")
+```
+
+It's hard to tell if there is contamination, we don't see a lot of these markers expressed,
+barring a couple outliers, which is good.
+
+```{r glial-contamination}
+pheatmap(sqrt(counts[rownames(counts) %in% glia,]), show_colnames=FALSE, cluster_rows=TRUE, show_rownames=TRUE, annotation=col_totals, drop_levels=FALSE, cluster_cols=FALSE)
+```
+
+```{r rpe-contamination}
+pheatmap(sqrt(counts[rownames(counts) %in% rpe,]), show_colnames=FALSE, cluster_rows=TRUE, show_rownames=TRUE, annotation=col_totals, drop_levels=FALSE, cluster_cols=FALSE)
+```
+
 
 #### What are the genes with the highest variation?
 
@@ -254,7 +288,7 @@ points(log(means[varorder[1:100]]),log(cv2[varorder[1:100]]),col=2)
 
 This identifies a set of genes that are more variable than expected:
 
-```{r variance-set}   
+```{r variance-set}
 pval <- pchisq(varFitRatio*df,df=df,lower.tail=F)
 adj.pval <- p.adjust(pval,"fdr")
 sigVariedGenes <- adj.pval<1e-3;
@@ -267,18 +301,19 @@ write.table(sig_varied, file="significant_variation.tsv", sep="\t",
 ```
 
 Are any of these photoreceptor or housekeeping genes?
-```{r photoreceptor-and-housekeeping-variance, results='asis'}
-photoreceptor = c(rod, roska_cone, roska_rod)
+```{r photoreceptor-and-housekeeping-variance}
+photoreceptor = c(rod, roska_cone)
 sig_varied$id = rownames(sig_varied)
 ```
 
 photoreceptors:
-```{r photoreceptor-variance}
+```{r photoreceptor-variance, results='asis'}
 photoreceptor_varied = sig_varied[rownames(sig_varied) %in% photoreceptor,]
 kable(sig_varied[rownames(sig_varied) %in% photoreceptor,], format='markdown')
 ```
+
 housekeeping:
-```{r housekeeping-variance}
+```{r housekeeping-variance, results='asis'}
 housekeeping_varied = sig_varied[rownames(sig_varied) %in% housekeeping,]
 kable(sig_varied[rownames(sig_varied) %in% housekeeping,], format='markdown')
 ```
@@ -287,7 +322,7 @@ Are these driven by a small number of outlier samples or is there just more over
 variation for the photoreceptor genes?
 
 ```{r housekeeping-variance-heatmap}
-pheatmap(normcounts[rownames(normcounts) %in% photoreceptor_varied$id,], show_colnames=FALSE, cluster_rows=TRUE, show_rownames=TRUE, annotation=col_totals, drop_levels=FALSE)
+pheatmap(sqrt(counts[rownames(counts) %in% photoreceptor_varied$id,]), show_colnames=FALSE, cluster_rows=TRUE, show_rownames=TRUE, annotation=col_totals, drop_levels=FALSE)
 ```
 
 It looks like there are a small number of samples that have high expression of these genes.
@@ -308,3 +343,32 @@ know for sure.
 and for some samples even less than that, so for many samples we're not seeing the
 genes at all. Is that due to incomplete capturing of the mRNA or not sequencing deep
 enough? We can't really tell.
+
+While the new SCRB-seq is better than the old one, it is still not picking out very
+many genes. If we look at the number of genes detected per sample, it is still very low,
+around 1000 genes.
+
+```{r genes-detected-histogram}
+qplot(colSums(counts > 0)) + geom_histogram() + scale_x_sqrt() + scale_y_sqrt() +
+   xlab("genes detected") + ylab("cells")
+```
+
+Some of the alternate methods seem to be detecting a lot more than
+that, but I have no personal experience with those datasets yet. For example:
+
+Picelli, S., Björklund, A. K., Faridani, O. R., Sagasser, S., Winberg, G., & Sandberg, R. (2013). Smart-seq2 for sensitive full-length transcriptome profiling in single cells. Nature Methods, 10(11), 1096–1098. doi:10.1038/nmeth.2639
+
+Having only 20,000 counts per cell on average is killer as well. There also
+seems to be a large number of the reads concentrated in a single gene, Malat1:
+
+```{r counts-per-gene}
+ qplot(rowSums(counts)) + geom_histogram() + scale_x_sqrt() + scale_y_sqrt()
+```
+
+I'm not sure what is so special about Malat1 that it is found so consistently in every
+sample. I'm suspecting there is some kind of technical issue with it:
+
+```{r malat1}
+rowSums(counts)[rowSums(counts) > 4e05]
+summary(rowSums(counts))
+```
