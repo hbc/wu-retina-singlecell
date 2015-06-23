@@ -1,0 +1,707 @@
+--
+  html_document:
+    toc: true
+    highlight: zenburn
+    theme: united
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(tidy=TRUE, highlight=TRUE, dev="png",
+               cache=TRUE, highlight=TRUE, autodep=TRUE, warning=FALSE,
+               error=FALSE, message=FALSE, prompt=TRUE, comment='', fig.cap='')
+```
+# Overview
+
+```{r qc-setup}
+base_dir = "/Users/rory/cache/wu-retina-singlecell/pilot-plate/"
+library(ggplot2)
+library(reshape)
+library(gplots)
+library(edgeR)
+library(CHBUtils)
+library(pheatmap)
+project_summary = paste(base_dir, "project-summary.csv", sep="")
+counts_file = paste(base_dir, "combined.counts", sep="")
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442",
+"#0072B2", "#D55E00", "#CC79A7")
+summarydata = data.frame(read.table(project_summary, header=TRUE, sep=","),
+row.names="Name", check.rows=FALSE)
+summarydata$Name = rownames(summarydata)
+summarydata = summarydata[order(summarydata$Name),]
+counts = read.table(counts_file, header=TRUE, row.names="id", check.names=FALSE)
+counts = counts[, order(colnames(counts))]
+cnames = unlist(lapply(colnames(counts), function(x) strsplit(x, ".", fixed=TRUE)[[1]][1]))
+colnames(counts) = cnames
+# this is a list of all non user-supplied metadata columns that could appear
+known_columns = c("Name", "X.GC", "Exonic.Rate",
+              "Sequences.flagged.as.poor.quality", "rRNA.rate",
+              "Fragment.Length.Mean", "Intronic.Rate",
+              "Intergenic.Rate", "Mapping.Rate", "Quality.format",
+              "Duplication.Rate.of.Mapped", "Mapped", "rRNA",
+              "Sequence.length", "Transcripts.Detected",
+              "Mean.Per.Base.Cov.", "Genes.Detected",
+              "Unique.Starts.Per.Read", "unique_starts_per_read",
+              "complexity", "X5.3.bias")
+summarydata$ds.red.z = (summarydata$ds.red - mean(summarydata$ds.red)) / sd(summarydata$ds.red)
+summarydata$wrow = substring(summarydata$well, 1, 1)
+summarydata$wcol = substring(summarydata$well, 2, 2)
+full = subset(summarydata, conc == "Full")
+full_counts = counts[, colnames(counts) %in% full$Name]
+full_counts = full_counts[rowSums(full_counts > 0) > 2,]
+```
+
+```{r heatmap-annotations}
+pheatmap(cor(full_counts), annotation=summarydata[, c("rescued", "plate", "ds.red",
+   "ds.red.z", "well", "wrow", "wcol")])
+```
+
+```{r correlation-normalized}
+y = DGEList(counts=full_counts)
+y = calcNormFactors(y)
+normalized_counts = cpm(y, normalized.lib.sizes=TRUE)
+pheatmap(cor(normalized_counts), annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
+```
+
+```{r correlation-propcor}
+
+propcor = function(x, y) {
+    x = log(x + 0.1)
+    y = log(y + 0.1)
+    num = 2 * cov(x, y)
+    denom = var(x) + var(y)
+return(num/denom)}
+
+do_propcor = function(x) {
+     foo = list()
+     for(i in seq_len(ncol(x))) {
+         for(j in seq_len(ncol(x))) {
+        x2 = x[, i]
+        y2 = x[, j]
+        foo = c(foo, propcor(x2, y2)) } }
+    foo = unlist(foo)
+    foo = matrix(foo, ncol(x), ncol(x))
+    colnames(foo) = colnames(x)
+    rownames(foo) = colnames(x)
+    return(foo)}
+
+z = do_propcor(full_counts)
+pheatmap(z, annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
+```
+
+```{r heatmap-function}
+get_heatmap_fn = function(summarydata) {
+    # return the pheatmap function with or without metadata
+    metadata = summarydata[, !colnames(summarydata) %in% known_columns, drop=FALSE]
+    if(ncol(metadata) == 0) {
+       return(pheatmap)
+    }
+    else {
+    # rownames(metadata) = summarydata$Name
+    heatmap_fn = function(data, ...) {
+        pheatmap(data, annotation=metadata, ...)
+    }
+    return(heatmap_fn)
+}}
+heatmap_fn = get_heatmap_fn(summarydata)
+```
+
+# Quality control metrics
+
+## Mapped reads
+```{r mapped-plot}
+ggplot(summarydata, aes(x=Name, y=Mapped)) +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    geom_bar(stat="identity") +
+    ylab("mapped reads") + xlab("")
+```
+
+## Genomic mapping rate
+```{r mapping-rate-plot}
+ggplot(summarydata, aes(x=Name, y=Mapping.Rate)) +
+    geom_bar(stat="identity") +
+    ylab("mapping rate") + xlab("") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90))
+```
+
+## Unique mapping rate
+```{r unique-rate-plot}
+dd = data.frame(Name=names(counts), Unique=colSums(counts), Mapped=summarydata[,"Mapped"])
+ggplot(dd, aes(x=Name, y=Unique/Mapped)) +
+    geom_bar(stat="identity") +
+    ylab("unique mapping rate") + xlab("") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90))
+```
+
+## Number of genes detected
+```{r genes-detected-plot}
+dd = data.frame(Name=names(counts), Genes.Detected = colSums(counts > 0))
+ggplot(dd, aes(x=Name, y=Genes.Detected)) +
+    geom_bar(stat="identity") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("genes detected") + xlab("")
+```
+
+## Gene detection saturation
+```{r saturation-plot}
+dd = data.frame(Mapped=summarydata$Mapped, Genes.Detected = colSums(counts > 0))
+ggplot(dd, aes(x=Mapped, y=Genes.Detected)) +
+    geom_point() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("genes detected") + xlab("reads mapped")
+```
+
+## Exonic mapping rate
+```{r exonic-mapping-plot}
+ggplot(summarydata, aes(x=Name, y=Exonic.Rate)) +
+    geom_bar(stat="identity") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("exonic mapping rate") + xlab("")
+```
+
+## rRNA mapping rate
+```{r rRNA-rate-plot}
+ggplot(summarydata, aes(x=Name, y=rRNA.rate)) +
+    geom_bar(stat="identity") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("rRNA rate") + xlab("")
+```
+
+## Estimated fragment length of paired-end reads
+```{r fragment-length-plot}
+ggplot(summarydata, aes(x=Name, y=Fragment.Length.Mean)) +
+    geom_bar(stat="identity") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("fragment length") + xlab("")
+```
+
+## Boxplot of log10 counts per gene
+```{r boxplot-raw}
+melted = melt(counts)
+colnames(melted) = c("sample", "count")
+melted$sample = factor(melted$sample)
+melted$sample = reorder(melted$sample, colnames(counts))
+melted$count = log(melted$count)
+ggplot(melted, aes(x=sample, y=count)) + geom_boxplot() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("")
+```
+
+## Boxplot of log10 TMM-normalized counts per gene
+Trimmed mean of M-values (TMM) normalization is described
+[here](http://genomebiology.com/2010/11/3/R25)
+
+Robinson, M. D., & Oshlack, A. (2010). A scaling normalization method for differential expression analysis of RNA-seq data. Genome Biology, 11(3). doi:10.1186/gb-2010-11-3-r25
+
+```{r boxplot-normalized}
+y = DGEList(counts=counts)
+y = calcNormFactors(y)
+normalized_counts = cpm(y, normalized.lib.sizes=TRUE)
+melted = melt(normalized_counts)
+colnames(melted) = c("gene", "sample", "count")
+melted$sample = factor(melted$sample)
+melted$sample = reorder(melted$sample, colnames(counts))
+melted$count = log(melted$count)
+ggplot(melted, aes(x=sample, y=count)) + geom_boxplot() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("")
+```
+
+## Density of log10 TMM-normalized counts
+```{r density-normalized}
+ggplot(melted, aes(x=count, group=sample)) +
+    geom_density() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("")
+```
+
+## Correlation (Pearson) heatmap of TMM-normalized counts
+```{r pearson-heatmap-normalized}
+heatmap_fn(cor(normalized_counts, method="pearson"))
+```
+
+## Correlation (Spearman) heatmap of TMM-normalized counts
+```{r spearman-heatmap-normalized}
+heatmap_fn(cor(normalized_counts, method="spearman"))
+```
+
+## MDS plot of TMM-normalized counts
+```{r mds-normalized}
+mds(normalized_counts, k=length(colnames(normalized_counts)) - 1)
+```
+
+## Heatmap of top 30 most expressed genes
+```{r top-count-genes, results='asis'}
+select = order(rowMeans(normalized_counts),decreasing=TRUE)[1:30]
+heatmap_fn(log(normalized_counts[select,] + 1))
+```
+
+## What types of RNA was sequenced?
+
+```{r rna-biotype-density}
+library(biomaRt)
+melted = melt(log(normalized_counts))
+colnames(melted) = c("gene", "sample", "count")
+mart = useMart("ensembl", dataset="mmusculus_gene_ensembl")
+bm = getBM(mart=mart, attributes=c("ensembl_gene_id", "transcript_biotype"))
+idx = match(melted$gene, bm$ensembl_gene_id)
+melted$biotype = bm[idx, 2]
+ggplot(melted[is.numeric(melted$count),], aes(x=count, group=sample)) +
+  geom_density(adjust=1) + facet_wrap(~biotype) +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("")
+```
+
+```{r scde-analysis}
+library(scde)
+o.ifm = scde.error.models(counts=full_counts, groups=full$rescued,
+        save.crossfit.plots=F, n.cores=1, threshold.segmentation=T,
+        save.model.plots=F, verbose=0)
+valid.cells <- o.ifm$corr.a >0;
+o.ifm = o.ifm[valid.cells,]
+valid_counts = full_counts[, valid.cells]
+valid_summary = subset(full, rownames(full) %in% colnames(valid_counts))
+o.prior <- scde.expression.prior(models=o.ifm,counts=valid_counts, length.out=400,show.plot=T)
+ediff = scde.expression.difference(o.ifm, valid_counts, o.prior,
+                                   groups=valid_summary$rescued,
+                                   n.randomizations=100, n.cores=1, verbose=0)
+ediff$pvalue = pnorm(-(abs(ediff$Z))) * 2
+ediff$padj = p.adjust(ediff$pvalue)
+ediff = ediff[order(ediff$pvalue),]
+```
+
+We still can't find anything significantly different.
+
+```{r remove-noisy-genes}
+winsorize <- function(x, fraction = 0.05) {
+    if (length(fraction) != 1 || fraction < 0 || fraction > 0.5) {
+        stop("bad value for 'fraction,use < 0.5'")
+    }
+    lim <- quantile(x, probs = c(fraction, 1 - fraction))
+    x[x < lim[1]] <- lim[1]
+    x[x > lim[2]] <- lim[2]
+    x
+}
+ed = t(apply(normalized_counts, 1, winsorize, fraction=0.1))
+```
+
+```{r cone-rod-housekeeping-genes}
+rod = c("Rho","Sag","Pdc","Gnat1","Pde6g","Rom1","Gngt1","Unc119",
+        "Gnb1","Gcap1","Guca1a","Pde6b","Guca2a","Prph2","Aipl1",
+        "Tulp1","Rs1","Rcvrn","Cngb1")
+roska_cone = c("Pde6c","Opn1sw","Fabp7","Gnat2","Opn1mw","Pde6h","Clca3",
+              "Clca3","Clca3","Agr2","Arr3","Gulo","Otop3","Ppm1j","Mogat1","Mogat1",
+              "Osgep","Ppp1r14d","Cngb3","Igj","1700113O17Rik","Gngt2","En2","Rbp3",
+              "Rbp3","Lcn2","Acbd6")
+rod = c(rod, "Pde6b","Nr2e3","Cnga1","Pde6a","A930006D01Rik","Rp1","Cyld",
+             "Sh2d1a","Guca1b","Faim","Gm12689","Gm12689","Gnb1","Fscn2",
+             "Reep6","Nxnl2","Nxnl1","Nrl","Gm13251","Gm13251","1700020D05Rik",
+             "Spata1","Olfr772","Slc24a1","Ybx3","Gm9958","Gm9958","Rex2",
+             "Rexo2","Ppap2c","Hmgb2")
+melted = melt(log(normalized_counts))
+colnames(melted) = c("gene", "sample", "count")
+mart = useMart("ensembl", dataset="mmusculus_gene_ensembl")
+bm = getBM(mart=mart, attributes=c("ensembl_gene_id", "mgi_symbol"))
+bm$id = bm$ensembl_gene_id
+bm$ensembl_gene_id = NULL
+
+symbols = data.frame(normalized_counts)
+symbols$id = rownames(normalized_counts)
+library(dplyr)
+symbols = symbols %>% left_join(bm, by="id")
+```
+
+# More rod expression than cone expression
+
+```{r rod-expression}
+rod_vals = subset(symbols, mgi_symbol %in% rod)
+rownames(rod_vals) = rod_vals$mgi_symbol
+rod_vals$mgi_symbol = NULL
+rod_vals$id = NULL
+rod_vals = log(rod_vals + 1)
+colnames(rod_vals) = colnames(normalized_counts)
+pheatmap(rod_vals, annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")], fontsize=6, main="rod genes")
+```
+
+
+```{r cone-expression}
+cone_vals = subset(symbols, mgi_symbol %in% roska_cone)
+rownames(cone_vals) = cone_vals$mgi_symbol
+cone_vals$mgi_symbol = NULL
+cone_vals$id = NULL
+cone_vals = log(cone_vals + 1)
+colnames(cone_vals) = colnames(normalized_counts)
+pheatmap(cone_vals, annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")], fontsize=6, main="cone genes")
+```
+
+There looks to be some genes which might be cones by accident; we can see that
+P2-1B and P1-2E have less rod expressed genes than the other cells. P1-3G as
+well. All of the rescued cells are missing Sag and Gnat1 and those are expressed
+highly in the non-rescued cells.
+
+P1-3G looks like a cone, as it is expressing pretty low for the rod genes and
+high for the cone genes. We can maybe filter out some of the rod and cone
+genes, as markers since it looks like some of them might be wrong. Nxn1,
+Guaca1b and Guaca1a
+
+For the two outliers for ds-red expression, both are on the rescued plate, but
+one clusters with the non-rescued cells.
+
+# ds-red distribution
+ds-red mesaurements varied over a couple orders of magnitude. This
+didn't seem to be a particularly useful metric in terms of classifying the
+samples.
+```{r ds-red distribution}
+ggplot(summarydata, aes("ds.red", ds.red)) + geom_point() + scale_y_log10() +
+     xlab("") + ylab("ds-red expression") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90))
+```
+
+## rod-cones take 2
+
+```{r load-type-annotations}
+types_fn = "/Users/rory/cache/wu-retina-singlecell/metadata/gene_types.tsv"
+types = read.table(types_fn, header=TRUE, stringsAsFactors=FALSE)
+types = types[!duplicated(types$id),]
+rownames(types) = types$id
+types$type = as.factor(types$type)
+```
+Some annotations are duplicated, so drop them.
+
+```{r duplicated-types}
+mart = useMart("ensembl", dataset="mmusculus_gene_ensembl")
+bm = getBM(mart=mart, attributes=c("ensembl_gene_id", "mgi_symbol"))
+bm$id = bm$ensembl_gene_id
+bm$ensembl_gene_id = NULL
+m = merge(types, bm, by="id")
+m = m[order(m$type),]
+all_types = m
+cone_rod = subset(all_types, type %in% c("cone_specific_or_enriched", "novel_cone_1",
+                                     "novel_cone_2", "rod_enriched", "rod_specific"))
+cbPalette <- colorRampPalette(c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7"))
+```
+
+Now look at their expression:
+
+```{r heatmap-types}
+lcounts = data.frame(log(normalized_counts + 1))
+colnames(lcounts) = colnames(counts)
+ann_colors = list(type=cbPalette(nlevels(all_types$type)))
+names(ann_colors[[1]]) <- levels(all_types$type)
+anno_df = data.frame(type=all_types$type)
+rownames(anno_df) = all_types$id
+pheatmap(lcounts[all_types$id,], fontsize=6, annotation_row=anno_df,
+         cluster_rows=FALSE, show_rownames=FALSE, annotation_colors=ann_colors,
+         annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
+ggsave("heatmap-all.pdf")
+cone_rod_counts = lcounts[cone_rod$id,]
+rownames(cone_rod_counts) = cone_rod[match(rownames(cone_rod_counts), cone_rod$id), "mgi_symbol"]
+anno_df = data.frame(type=all_types$type)
+rownames(anno_df) = all_types$mgi_symbol
+pheatmap(cone_rod_counts, fontsize=6, annotation_row=anno_df,,
+         cluster_rows=FALSE, annotation_colors=ann_colors,
+         annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
+ggsave("heatmap-cone-rod-only.pdf")
+```
+
+Most of the cells seem to be enriched for the rod markers. Cells P1_3G looks
+like it might be two cells, a cone and a rod. P2_1B doens't really look
+like any of the cell types and P1_2E looks like it might be a cone.
+
+Drop those cells so we are left with just rods.
+
+```{r drop-non-rods}
+drop_cols = grepl("P1-3G", colnames(lcounts))
+drop_cols = drop_cols | grepl("P2-1B", colnames(lcounts))
+drop_cols = drop_cols | grepl("P1-2E", colnames(lcounts))
+
+rod_counts = lcounts[,!drop_cols]
+ann_colors = list(type=cbPalette(nlevels(types$type)))
+names(ann_colors[[1]]) <- levels(types$type)
+
+pheatmap(rod_counts[rownames(types),], fontsize=6, annotation_row=types,
+         cluster_rows=FALSE, show_rownames=FALSE,
+         annotation_colors=ann_colors,
+         annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
+ggsave("heatmap-rods.pdf")
+```
+
+## revisiting the smart-seq data
+With these gene lists we can take another look and see if the cells cluster
+by subtype at all:
+
+```{r smartseq-data}
+smartseq_fn = "/Users/rory/cache/wu-retina-singlecell/05-2015-smartseq/combined.counts"
+smartseq = read.table(smartseq_fn, header=TRUE, row.names="id")
+smartseq_dge = DGEList(counts=smartseq)
+smartseq_dge = calcNormFactors(smartseq_dge)
+smartseq_normalized = cpm(smartseq_dge, normalized.lib.sizes=TRUE)
+lsmartseq = log(smartseq_normalized + 1)
+anno_df = data.frame(type=all_types$type)
+rownames(anno_df) = all_types$id
+pheatmap(lsmartseq[rownames(types),], fontsize=6, annotation_row=anno_df,
+         annotation_colors=ann_colors,
+         cluster_rows=FALSE, show_rownames=FALSE, show_colnames=FALSE)
+ggsave("heatmap-smartseq.pdf")
+cone_rod_smartseq = lsmartseq[cone_rod$id,]
+rownames(cone_rod_smartseq) = cone_rod[match(rownames(cone_rod_smartseq), cone_rod$id), "mgi_symbol"]
+anno_df = data.frame(type=all_types$type)
+rownames(anno_df) = all_types$mgi_symbol
+pheatmap(cone_rod_smartseq, fontsize=6, annotation_row=anno_df,,
+         cluster_rows=FALSE, annotation_colors=ann_colors,
+         annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
+ggsave("heatmap-smartseq-cone-rod-only.pdf")
+```
+
+It looks like there is a set of cells on the left that have multiple cells
+per well, a set of cells that are glia and a set of cells that didn't work.
+There is also a set of genes that might be cone enriched, it is tough to
+say.
+
+## revisiting the scrb-seq data
+```{r scrbseq-data}
+scrbseq_fn = "/Users/rory/cache/wu-retina-singlecell/counts/scrb-trimarchi/Cepko_Trimarchi_buffer.all.refseq.umi.dat"
+scrbseq = read.table(scrbseq_fn, header=TRUE)
+scrbseq_dge = DGEList(counts=scrbseq)
+scrbseq_dge = calcNormFactors(scrbseq_dge)
+scrbseq_normalized = cpm(scrbseq_dge, normalized.lib.sizes=TRUE)
+lscrbseq = log(scrbseq_normalized + 1)
+anno_df = data.frame(type=all_types$type)
+rownames(anno_df) = all_types$mgi_symbol
+lscrbseq = subset(lscrbseq, rownames(lscrbseq) %in% rownames(anno_df))
+anno_df = subset(anno_df, rownames(anno_df) %in% rownames(lscrbseq))
+pheatmap(lscrbseq[rownames(anno_df),], fontsize=6, annotation_row=anno_df,
+         annotation_colors=ann_colors,
+         cluster_rows=FALSE, show_rownames=FALSE, show_colnames=FALSE)
+ggsave("heatmap-scrbseq.pdf")
+scrbseq_cone_rod = subset(cone_rod, cone_rod$mgi_symbol %in% rownames(lscrbseq))
+cone_rod_scrbseq = lscrbseq[scrbseq_cone_rod$mgi_symbol,]
+anno_df = data.frame(type=all_types$type)
+rownames(anno_df) = all_types$mgi_symbol
+pheatmap(cone_rod_scrbseq, fontsize=6, annotation_row=anno_df,,
+         cluster_rows=FALSE, annotation_colors=ann_colors, show_colnames=FALSE,
+         annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
+ggsave("heatmap-scrbseq-cone-rod-only.pdf")
+```
+
+```{r dropseq}
+dropseq_fn = "/Users/rory/cache/wu-retina-singlecell/drop-seq/GSM1626793_P14Retina_1.digital_expression.txt"
+dropseq <- read.table(dropseq_fn, header=TRUE, row.names=1)
+
+qplot(rowSums(dropseq)) +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("counts per gene") +
+          scale_x_log10() + ylab("")
+qplot(colSums(dropseq)) +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("counts per sample") +
+    scale_x_log10() + ylab("")
+
+qplot(colSums(dropseq > 0)) +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("genes detected per sample") +
+    scale_x_log10() + ylab("")
+```
+
+For DropSeq each of these counts is an individual transcript. We detect a low number
+of genes per sample, at low counts, similar to SCRB-seq. DropSeq is more efficient
+in detecting transcripts, however:
+
+```{r dropseq-vs-scrbseq}
+df <- data.frame(reads=colSums(dropseq), detected=colSums(dropseq > 0))
+
+ggplot(df, aes(reads, detected)) + geom_point() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90))
+
+scrbseq_df <- data.frame(reads=colSums(scrbseq), detected=colSums(scrbseq > 0))
+
+df$type <- "dropseq"
+scrbseq_df$type <- "scrbseq"
+
+all <- rbind(df, scrbseq_df)
+ggplot(all, aes(reads, detected, color=type)) + geom_point() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90))
+
+ggplot(all, aes(reads, detected, color=type)) + geom_point() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90))
+scrbseq = read.table(scrbseq_fn, header=TRUE)
+```
+
+I'm kind of rethinking what I thought before about SCRB-seq; maybe it is possible to do it, but you just need a couple of orders of magnitude more cells than we've
+been looking at. In the Drop-Seq paper they sequenced 45k cells, and were able
+to suss out the major cell types in the retina with 1,000 cells. Maybe if we can
+do on the order of tens of thousands of cells, we can pick out some
+subpopulations.
+
+One thing to note is that in the DropSeq paper, they picked the top 1/3 cells
+with the most number of counts to build the classifier. If we did that with just
+this 6k cell sample we took, that means the cutoff for genes detected would be
+somewhere around 1,000 genes, a pretty low amount.
+
+I went into the DropSeq paper and pulled out the set of genes that were
+identified as the classifier for rods and made heatmaps of those for the
+datasets:
+
+the SMART-seq data:
+
+```{r dropseq-rod-smartseq}
+dropseq_rod_up_human <- c("CARTPT","MAF","PPP1R17","GPR22","GNG2","NR4A2","IGFBP5",
+                          "GRIK1","SLC4A4","SNED1","CAMK4","KCND3","C1QL1","ID4",
+                          "GRIA3","LGR5","PCP4L1","DNER","NFIA", "IGFN1")
+dropseq_rod_down_human <- c("HBA-A1","HBB-BS","PCDH17","CHN2","SLC6A1","ELAVL2",
+                            "PCDH10","CBLN2","TKT","TAC2","HPGD","MGP","MEIS2",
+                            "GABRA1","SHISA9","CALD1","UNC13C","RBP1","QPCT","PTGDS")
+
+mouse = useMart("ensembl", dataset="mmusculus_gene_ensembl")
+human = useMart("ensembl", dataset="hsapiens_gene_ensembl")
+conversions = getLDS(attributes=c("entrezgene", "ensembl_gene_id",
+                                  "mgi_symbol"),
+                     attributesL=c("entrezgene", "ensembl_gene_id",
+                                   "hgnc_symbol"), mart=mouse, martL=human)
+
+dropseq_rod_up <- conversions[match(dropseq_rod_up_human, conversions$HGNC.symbol),
+                              "MGI.symbol"]
+dropseq_rod_up_id <- conversions[match(dropseq_rod_up_human, conversions$HGNC.symbol),
+                              "Ensembl.Gene.ID"]
+dropseq_rod_down_id <- conversions[match(dropseq_rod_down_human,
+                                         conversions$HGNC.symbol), "Ensembl.Gene.ID"]
+dropseq_rod_up <- dropseq_rod_up[!is.na(dropseq_rod_up)]
+dropseq_rod_down <- conversions[match(dropseq_rod_down_human, conversions$HGNC.symbol),
+                                "MGI.symbol"]
+dropseq_rod_down <- dropseq_rod_down[!is.na(dropseq_rod_down)]
+
+dropseq_rod <- c(dropseq_rod_up, dropseq_rod_down)
+dropseq_rod_id <-  c(dropseq_rod_up_id, dropseq_rod_down_id)
+dropseq_rod_id <- dropseq_rod_id[dropseq_rod_id %in% rownames(lsmartseq)]
+
+smart_dropseq_rod <- lsmartseq[dropseq_rod_id,]
+rownames(smart_dropseq_rod) = conversions[match(rownames(smart_dropseq_rod),
+                                                conversions$Ensembl.Gene.ID),
+                                                "MGI.symbol"]
+pheatmap(smart_dropseq_rod, fontsize=6, annotation_row=anno_df,,
+         cluster_rows=FALSE, annotation_colors=ann_colors, show_colnames=FALSE,
+         annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
+```
+
+SCRB-seq:
+```{r dropseq-scrbseq-rod}
+lscrbseq2 = log(scrbseq_normalized + 1)
+scrbseq_dropseq_rod_idx = rownames(lscrbseq2) %in% dropseq_rod
+scrbseq_dropseq_rod = lscrbseq2[scrbseq_dropseq_rod_idx,]
+pheatmap(scrbseq_dropseq_rod, fontsize=6,
+         cluster_rows=FALSE, annotation_colors=ann_colors, show_colnames=FALSE)
+```
+
+the pilot:
+```{r dropseq-pilot-rod}
+pilot_dropseq_rod <- lcounts[dropseq_rod_id,]
+rownames(pilot_dropseq_rod) = conversions[match(rownames(pilot_dropseq_rod),
+                                                conversions$Ensembl.Gene.ID),
+                                                "MGI.symbol"]
+pheatmap(pilot_dropseq_rod, fontsize=6, annotation_row=anno_df,,
+         cluster_rows=FALSE, annotation_colors=ann_colors, show_colnames=TRUE,
+         annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
+```
+
+Here is the dropseq data for the same set of genes, it looks pretty sparse,
+similar to the SCRB-seq data.
+
+```{r dropseq-rods}
+ids = unlist(lapply(rownames(dropseq), function(x) strsplit(x, ":")[[1]][3]))
+
+use_dropseq = ids %in% dropseq_rod
+ldropseq_rod = log(dropseq[use_dropseq,] + 1)
+pheatmap(ldropseq_rod, fontsize=6, cluster_rows=FALSE)
+```
+
+## difference between the quarter and full samples
+```{r full-quarter correlation}
+groups <- summarydata %>% group_by(code, conc) %>% select(Name, code, conc)
+full_name <- summarydata %>% filter(conc ==  "Full") %>% select(Name, code)
+quarter_name <- summarydata %>% filter(conc ==  "Quarter") %>% select(Name, code)
+cors <- list()
+names <- list()
+for(i in seq(nrow(full_name))) {
+  names <- c(names, as.character(full_name$code[i]))
+  cors <- c(cors, name=cor(lcounts[, full_name$Name[i]],
+                           lcounts[, quarter_name$Name[i]], method="spearman"))
+}
+names <-  unlist(names)
+cors <-  unlist(cors)
+qplot(names, cors) +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + ylab("spearman correlation") +
+          xlab("")
+
+cors <- list()
+names <- list()
+for(i in seq(nrow(full_name))) {
+  names <- c(names, as.character(full_name$code[i]))
+  cors <- c(cors, name=cor(lcounts[, full_name$Name[i]],
+                           lcounts[, quarter_name$Name[i]]))
+}
+names <-  unlist(names)
+cors <-  unlist(cors)
+qplot(names, cors) +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + ylab("pearson correlation") +
+    xlab("")
+```
+
+```{r highly-variant-genes}
+means = rowMeans(normalized_counts)
+vars = apply(normalized_counts,1,var)
+cv2 = vars/means^2
+
+par(mar=c(3.5,3.5,1,1),mgp=c(2,0.65,0),cex=0.9)
+smoothScatter(log(means),log(cv2))
+require(statmod)
+minMeanForFit <- unname( quantile( means[ which( cv2 > .3 ) ], .95 ) )
+useForFit <- means >= minMeanForFit # & spikeins
+fit <- glmgam.fit( cbind( a0 = 1, a1tilde = 1/means[useForFit] ),cv2[useForFit] )
+a0 <- unname( fit$coefficients["a0"] )
+a1 <- unname( fit$coefficients["a1tilde"])
+fit$coefficients
+afit <- a1/means+a0
+varFitRatio <- vars/(afit*means^2)
+varorder <- order(varFitRatio,decreasing=T)
+oed <- ed[varorder,]
+m <- oed[1:50,]
+heatmap(m/apply(m,1,max),zlim=c(0,1),col=gray.colors(100),Rowv=NA,Colv=NA,labRow=NA,scale="none")
+
+rowsd = apply(normalized_counts, 1, sd)
+
+var = rowsd / rowMeans(normalized_counts)
+```

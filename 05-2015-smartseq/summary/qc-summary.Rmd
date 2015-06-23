@@ -1,0 +1,493 @@
+---
+  html_document:
+    toc: true
+    highlight: zenburn
+    theme: united
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(tidy=TRUE, highlight=TRUE, dev="png",
+               cache=TRUE, highlight=TRUE, autodep=TRUE, warning=FALSE, error=FALSE,
+               message=FALSE, prompt=TRUE, comment='', fig.cap='')
+```
+
+# Overview
+```{r qc-setup}
+library(ggplot2)
+library(reshape)
+library(gplots)
+library(edgeR)
+library(CHBUtils)
+library(pheatmap)
+project_summary = "/Users/rory/cache/wu-retina-singlecell/05-2015-smartseq/project-summary.csv"
+counts_file = "/Users/rory/cache/wu-retina-singlecell/05-2015-smartseq/combined.counts"
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442",
+"#0072B2", "#D55E00", "#CC79A7")
+summarydata = read.table(project_summary, header=TRUE, sep=",")
+rownames(summarydata) = summarydata$Name
+summarydata = summarydata[order(summarydata$Name),]
+counts = read.table(counts_file, header=TRUE, row.names="id", check.names=FALSE)
+cnames = unlist(lapply(colnames(counts), function(x) strsplit(x, ".", fixed=TRUE)[[1]][1]))
+colnames(counts) = cnames
+counts = counts[, order(colnames(counts))]
+summarydata$Genes.Detected = colSums(counts > 0)
+# this is a list of all non user-supplied metadata columns that could appear
+known_columns = c("Name", "X.GC", "Exonic.Rate", "Sequences.flagged.as.poor.quality",
+    "rRNA.rate", "Fragment.Length.Mean", "Intronic.Rate", "Intergenic.Rate",
+    "Mapping.Rate", "Quality.format", "Duplication.Rate.of.Mapped", "Mapped",
+    "rRNA", "Sequence.length", "Transcripts.Detected", "Mean.Per.Base.Cov.",
+    "Genes.Detected", "Unique.Starts.Per.Read", "unique_starts_per_read",
+    "complexity", "X5.3.bias")
+```
+
+```{r filtering-help}
+filtered_counts = counts[rowSums(counts > 0) > 0.1*ncol(counts),]
+filtered_dat = cor(filtered_counts, method="spearman")
+annotations = summarydata[, c("plate", "location_info", "rescue", "Genes.Detected",
+                              "Fragment.Length.Mean")]
+pheatmap(filtered_dat, annotation=annotations)
+
+
+```{r heatmap-function}
+get_heatmap_fn = function(summarydata) {
+    # return the pheatmap function with or without metadata
+    metadata = summarydata[, !colnames(summarydata) %in% known_columns, drop=FALSE]
+    if(ncol(metadata) == 0) {
+       return(pheatmap)
+    }
+    else {
+    rownames(metadata) = summarydata$Name
+    heatmap_fn = function(data, ...) {
+        pheatmap(data, annotation=metadata, ...)
+    }
+    return(heatmap_fn)
+}}
+heatmap_fn = get_heatmap_fn(summarydata)
+```
+
+# Quality control metrics
+
+## Mapped reads
+```{r mapped-plot}
+ggplot(summarydata, aes(x=Name, y=Mapped)) +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    geom_bar(stat="identity") +
+    ylab("mapped reads") + xlab("")
+```
+
+## Genomic mapping rate
+```{r mapping-rate-plot}
+ggplot(summarydata, aes(x=Name, y=Mapping.Rate)) +
+    geom_bar(stat="identity") +
+    ylab("mapping rate") + xlab("") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90))
+```
+
+## Non-unique mapping rate
+```{r non-unique-mapping-rate-plot}
+dd = data.frame(Name=names(counts), NonUnique=summarydata[,"Mapped"] - colSums(counts))
+ggplot(dd, aes(x=Name, y=NonUnique)) +
+    geom_bar(stat="identity") +
+    ylab("non-unique reads") + xlab("") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90))
+```
+
+## Number of genes detected
+```{r genes-detected-plot}
+dd = data.frame(Name=names(counts), Genes.Detected = colSums(counts > 0))
+ggplot(dd, aes(x=Name, y=Genes.Detected)) +
+    geom_bar(stat="identity") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("genes detected") + xlab("")
+```
+
+## Exonic mapping rate
+```{r exonic-mapping-plot}
+ggplot(summarydata, aes(x=Name, y=Exonic.Rate)) +
+    geom_bar(stat="identity") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("exonic mapping rate") + xlab("")
+```
+
+## rRNA mapping rate
+```{r rRNA-rate-plot}
+ggplot(summarydata, aes(x=Name, y=rRNA.rate)) +
+    geom_bar(stat="identity") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("rRNA rate") + xlab("")
+```
+
+## Estimated fragment length of paired-end reads
+```{r fragment-length-plot}
+ggplot(summarydata, aes(x=Name, y=Fragment.Length.Mean)) +
+    geom_bar(stat="identity") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("fragment length") + xlab("")
+```
+
+## Does the tiny fragment length affect detection of genes?
+```{r fragment-length-vs-genes}
+ggplot(summarydata, aes(Fragment.Length.Mean, Mapped, size=Genes.Detected)) +
+    geom_point(scale=0.5) +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("Mapped") + xlab("mean fragment length")
+```
+
+## Read depth is not saturating
+```{r mapping-rate-vs-genes}
+ggplot(summarydata, aes(Mapped, Genes.Detected)) +
+    geom_point() +
+    geom_text(data=subset(summarydata, Mapped > 2500000 & Genes.Detected < 2200),
+                    aes(x=Mapped*1.10, y=Genes.Detected, label=Name, size=0.75)) +
+    geom_point(data=subset(summarydata, Mapped > 2500000 & Genes.Detected < 2200),
+                    aes(x=Mapped, y=Genes.Detected, color="red")) +
+    xlab("mapped reads") + ylab("genes detected") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90),
+          legend.position= "none")
+```
+
+For the vast majority of samples, we could be sequencing deeper. We can see here
+that the number of mapped reads does not seem to be saturating the genes detected.
+This isn't just a random stray read happening to align. Below is a plot of what
+the saturation plot should look like for a library that is saturated for gene
+detection.
+
+```{r saturation-supposed-to}
+gambiae <- read.table("/Volumes/Clotho/Users/rory/cache/mosquito-rnaseq/gambiae/project-summary.csv", sep=",", header=TRUE)
+ggplot(gambiae, aes(Mapped, Transcripts.Detected)) + geom_point() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90),
+          legend.position= "none") +
+    xlab("mapped reads") + ylab("genes detected")
+```
+
+If we restrict genes detected to be anything with 10 counts or more, we can see it
+even more clearly. Increasing the reads mapped by a factor of three increases
+the genes detected 3x or more. We can also see there are three libraries which seem
+to be very low complexity, they are sequenced more deeply but have only a small
+number of genes detected at 10 counts or more:
+
+```{r mapping-rate-vs-genes-ten-counts}
+dd = data.frame(name=summarydata$Name, mapped=summarydata$Mapped,
+   detected=colSums(counts > 10))
+ggplot(dd, aes(mapped, detected)) +
+    geom_point() +
+    geom_text(data=subset(dd, mapped > 2500000 & detected < 2200),
+                    aes(mapped*1.1, detected, label=name, size=0.75)) +
+    geom_point(data=subset(dd, mapped > 2500000 & detected < 2200),
+                    aes(mapped, detected, color="red")) +
+    xlab("mapped reads") + ylab("genes detected") +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90),
+          legend.position="none")
+```
+
+I think the Broad should be sequencing these samples more deeply.
+
+The samples don't cluster based on complexity, where complexity is the z-score of
+the number of genes detected / the number of reads mapped. They do have some
+clustering based on how many reads are mapped and the number of genes detected:
+
+```{r heatmap by complexity}
+complexity = summarydata$Genes.Detected / summarydata$Mapped
+complexity = (complexity - mean(complexity)) / sd(complexity)
+summarydata$complexity = complexity
+dat = cor(counts, method="spearman")
+pheatmap(dat, annotation=summarydata[, c("plate", "location_info", "rescue", "Genes.Detected", "Mapped")], fontsize=6)
+```
+
+## Boxplot of log10 counts per gene
+```{r boxplot-raw}
+melted = melt(counts)
+colnames(melted) = c("sample", "count")
+melted$sample = factor(melted$sample)
+melted$sample = reorder(melted$sample, colnames(counts))
+melted$count = log(melted$count)
+ggplot(melted, aes(x=sample, y=count)) + geom_boxplot() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("")
+```
+
+## Boxplot of log10 TMM-normalized counts per gene
+Trimmed mean of M-values (TMM) normalization is described
+[here](http://genomebiology.com/2010/11/3/R25)
+
+Robinson, M. D., & Oshlack, A. (2010). A scaling normalization method for differential expression analysis of RNA-seq data. Genome Biology, 11(3). doi:10.1186/gb-2010-11-3-r25
+
+```{r boxplot-normalized}
+y = DGEList(counts=counts)
+y = calcNormFactors(y)
+normalized_counts = cpm(y, normalized.lib.sizes=TRUE)
+melted = melt(normalized_counts)
+colnames(melted) = c("gene", "sample", "count")
+melted$sample = factor(melted$sample)
+melted$sample = reorder(melted$sample, colnames(counts))
+melted$count = log(melted$count)
+ggplot(melted, aes(x=sample, y=count)) + geom_boxplot() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("")
+```
+
+## Density of log10 TMM-normalized counts
+```{r density-normalized}
+ggplot(melted, aes(x=count, group=sample)) +
+    geom_density() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("")
+```
+
+## Correlation (Pearson) heatmap of TMM-normalized counts
+```{r pearson-heatmap-normalized}
+heatmap_fn(cor(normalized_counts, method="pearson"))
+```
+
+## Correlation (Spearman) heatmap of TMM-normalized counts
+```{r spearman-heatmap-normalized}
+heatmap_fn(cor(normalized_counts, method="spearman"))
+```
+
+## MDS plot of TMM-normalized counts
+```{r mds-normalized}
+mds(normalized_counts, k=length(colnames(normalized_counts)) - 1)
+```
+
+## Heatmap of top 30 most expressed genes
+```{r top-count-genes, results='asis'}
+select = order(rowMeans(counts),decreasing=TRUE)[1:30]
+heatmap_fn(counts[select,])
+```
+
+The cells don't seem to cluster in any meaningful way just using the correlation
+of the raw counts:
+
+```{r heatmap}
+dat <- cor(counts)
+class_colors <-  c("yellow", "purple", "blue")
+pheatmap(dat, annotation_colors=list(class_colors), annotation=summarydata[, c("plate", "location_info", "rescue")])
+```
+There's a low number of counts, most samples only have 250k counts per sample,
+this is still a really low amount.
+```{r counts-per-sample}
+qplot(colSums(counts)) +
+    geom_histogram() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("counts per sample")
+```
+
+Most genes have a very low number of counts:
+
+```{r counts-per-gene}
+qplot(rowSums(counts)) +
+    scale_y_sqrt() +
+    scale_x_sqrt() +
+    geom_histogram() +
+      theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("counts per gene")
+```
+
+Drop all genes that are never detected and drop all samples with very poor
+coverage of less than 10k counts per sample.
+
+```{r drop-low-counts}
+counts = counts[rowSums(counts) > 0,]
+counts = counts[, colSums(counts) > 10000]
+summarydata = subset(summarydata, rownames(summarydata) %in% colnames(counts))
+
+known_summarydata = subset(summarydata, location_info != "None")
+known_counts = counts[, colnames(counts) %in% rownames(known_summarydata)]
+```
+
+```{r scde-setup}
+library(knitr)
+library(scde)
+o.ifm = scde.error.models(counts=known_counts, groups=known_summarydata$location_info,
+        save.crossfit.plots=F, n.cores=1, threshold.segmentation=T,
+        save.model.plots=F, verbose=0)
+valid.cells <- o.ifm$corr.a >0;
+o.ifm = o.ifm[valid.cells,]
+valid_counts = known_counts[, valid.cells]
+valid_summary = subset(known_summarydata, rownames(known_summarydata)
+   %in% colnames(valid_counts))
+o.prior <- scde.expression.prior(models=o.ifm,counts=valid_counts, length.out=400,show.plot=T)
+valid_summary$location_info = droplevels(valid_summary$location_info)
+```
+
+
+```{r scde-de}
+ediff = scde.expression.difference(o.ifm, valid_counts, o.prior,
+                                   groups=valid_summary$location_info,
+                                   n.randomizations=100, n.cores=1, verbose=0)
+ediff$pvalue = pnorm(-(abs(ediff$Z))) * 2
+ediff$padj = p.adjust(ediff$pvalue)
+ediff = ediff[order(ediff$pvalue),]
+kable(subset(ediff, padj < 0.20), format="markdown")
+```
+
+We can't find any significant genes again. Are there other forms of variation we
+are not capturing? Again we can still see there is a difference in Xist between
+the samples, indicating that there may be gender differences in the samples:
+
+```{r xist-plot}
+xist = melt(counts["ENSMUSG00000086503",])
+xist$class = summarydata$location_info
+ggplot(xist, aes(class, value)) + stat_binhex() + scale_y_sqrt() +
+      theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("")
+```
+
+As a starting point we can outlist of the top 100 genes by p-value; just because
+things aren't significantly different doesn't mean you can't follow up on
+hits. It just means you have to do some confirmatory type experiments.
+
+```{r de-output}
+write.table(head(ediff, 100), file="fovea-periphery.tsv", sep="\t", quote=FALSE,
+  col.names=TRUE, row.names=TRUE)
+```
+
+### Are these rod photoreceptors?
+```{r convert-symbols}
+library(biomaRt)
+mart = useMart("ensembl", dataset="mmusculus_gene_ensembl")
+gene_conversion = getBM(attributes=c('ensembl_gene_id', 'mgi_symbol'),
+                        filters="ensembl_gene_id", values=rownames(counts), mart=mart)
+m <- merge(counts, gene_conversion, by.x="row.names", by.y="ensembl_gene_id",
+           all.x=FALSE, all.y=FALSE)
+m <- m[!duplicated(m$mgi_symbol),]
+rownames(m) <- m$mgi_symbol
+m$mgi_symbol <- NULL
+m$Row.names <- NULL
+rod = c("Rho","Sag","Pdc","Gnat1","Pde6g","Rom1","Gngt1","Unc119",
+        "Gnb1","Gcap1","Guca1a","Pde6b","Guca2a","Prph2","Aipl1",
+        "Tulp1","Rs1","Rcvrn","Cngb1")
+roska_cone = c("Pde6c","Opn1sw","Fabp7","Gnat2","Opn1mw","Pde6h","Clca3",
+              "Clca3","Clca3","Agr2","Arr3","Gulo","Otop3","Ppm1j","Mogat1","Mogat1",
+              "Osgep","Ppp1r14d","Cngb3","Igj","1700113O17Rik","Gngt2","En2","Rbp3",
+              "Rbp3","Lcn2","Acbd6")
+rod = c(rod, "Pde6b","Nr2e3","Cnga1","Pde6a","A930006D01Rik","Rp1","Cyld","Sh2d1a","Guca1b","Faim","Gm12689","Gm12689","Gnb1","Fscn2","Reep6","Nxnl2","Nxnl1","Nrl","Gm13251","Gm13251","1700020D05Rik","Spata1","Olfr772","Slc24a1","Ybx3","Gm9958","Gm9958","Rex2","Rexo2","Ppap2c","Hmgb2")
+rod = unique(rod)
+```
+They don't seem to be clustering into cone/rod groups very well, similar to before.
+
+```{r rods-vs-cones}
+col_totals <- data.frame(depth=colSums(m), detected=colSums(m > 0))
+m <-  m[, rownames(col_totals)]
+rod_indexes <- rownames(m) %in% rod
+cone_indexes <-  rownames(m) %in% roska_cone
+
+rod_genes = rod[rod %in% rownames(m)]
+cone_genes = unique(roska_cone[roska_cone %in% rownames(m)])
+anno_df = data.frame(receptor_type=c(rep("rod", length(rod_genes)), rep("cone", length(cone_genes))))
+rownames(anno_df) = c(rod_genes, cone_genes)
+z = m[c(rod_genes, cone_genes),]
+head(anno_df)
+head(colnames(sqrt(t(z))))
+heatmap(sqrt(t(z)), annotation=anno_df)
+pheatmap(t(sqrt(m[c(rod_genes, cone_genes),])), show_colnames=TRUE,
+cluster_rows=FALSE, cluster_cols=FALSE, annotation=anno_df, show_rownames=FALSE)
+
+
+
+```{r rod-and-cone-heatmap}
+anno = data.frame(type=ifelse(rod_indexes & cone_indexes, "both",
+ ifelse(rod_indexes, "rod", ifelse(cone_indexes, "cone", "none"))))
+rownames(anno) = rownames(m)
+a = subset(anno, type != "none")
+pheatmap(t(sqrt(sqrt(m[cone_indexes | rod_indexes,]))), show_colnames=TRUE, cluster_rows=TRUE, annotation=a, show_rownames=FALSE)
+```
+
+Maybe we can get better results if we use one of the SCDE distance metrics instead.
+
+```{r scde-clustering-fail-correction}
+n.simulations <- 500; k <- 0.9;
+n.cores = 1
+p.self.fail <- scde.failure.probability(models=o.ifm,counts=counts)
+cell.names <- colnames(valid_counts); names(cell.names) <- cell.names;
+dl <- mclapply(1:n.simulations,function(i) {
+  scd1 <- do.call(cbind,lapply(cell.names,function(nam) {
+    x <- valid_counts[,nam];
+    # replace predicted drop outs with NAs
+    x[!as.logical(rbinom(length(x),1,1-p.self.fail[,nam]*k))] <- NA;
+    x;
+    }))
+  rownames(scd1) <- rownames(valid_counts);
+  # calculate correlation on the complete observation pairs
+  cor(log10(scd1+1),use="pairwise.complete.obs");
+},mc.cores=n.cores)
+```
+
+```{r scde-clustering-fail-correction-plot}
+mean_correlations = Reduce("+", dl) / length(dl)
+heatmap_annotations = summarydata[, c("location_info", "complexity",
+                                      "Fragment.Length.Mean", "Mapped",
+                                      "Duplication.Rate.of.Mapped")]
+pheatmap(mean_correlations, show_colnames=TRUE, cluster_rows=TRUE,
+         annotation=heatmap_annotations)
+```
+
+```{r scde-clustering-reciprocal}
+require(boot)
+k <- 0.95;
+o.fpm <- scde.expression.magnitude(o.ifm,counts=counts);
+reciprocal.dist <- do.call(rbind,mclapply(cell.names,function(nam1) {
+  unlist(lapply(cell.names,function(nam2) {
+    # reciprocal probabilities
+    f1 <- scde.failure.probability(models=o.ifm[nam1,,drop=F],magnitudes=o.fpm[,nam2])
+    f2 <- scde.failure.probability(models=o.ifm[nam2,,drop=F],magnitudes=o.fpm[,nam1])
+    # weight factor
+    pnf <- sqrt((1-f1)*(1-f2))*k +(1-k);
+    boot::corr(log10(cbind(counts[,nam1],counts[,nam2])+1),w=pnf)
+    }))},mc.cores=n.cores))
+```
+
+```{r scde-clustering-recpricoal-plot}
+pheatmap(reciprocal.dist, annotation=annotations)
+```
+
+### Are cones or rods enriched?
+
+```{r are-cone-genes-enriched}
+rod_counts = m[rownames(m) %in% rod_genes,]
+cone_counts = m[rownames(m) %in% cone_genes,]
+
+mrods = melt(rod_counts)
+mrods$type = "rod"
+mcones = melt(cone_counts)
+mcones$type = "cone"
+
+x = rbind(mrods, mcones)
+z = subset(x, value > 10)
+ggplot(z, aes(type, value)) + geom_boxplot() + scale_y_log10() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) + xlab("") + ylab("counts")
+t.test(subset(z, type == "rod")$value, subset(z, type == "cone")$value)
+ks.test(subset(z, type == "rod")$value, subset(z, type == "cone")$value)
+
+hm = aov(value ~ variable + type, z)
+```
