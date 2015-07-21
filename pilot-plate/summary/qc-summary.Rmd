@@ -1,4 +1,4 @@
---
+---
   html_document:
     toc: true
     highlight: zenburn
@@ -10,7 +10,18 @@ knitr::opts_chunk$set(tidy=TRUE, highlight=TRUE, dev="png",
                cache=TRUE, highlight=TRUE, autodep=TRUE, warning=FALSE,
                error=FALSE, message=FALSE, prompt=TRUE, comment='', fig.cap='')
 ```
-# Overview
+## Overview
+This is an analysis looking at the pilot plate samples; there are 24 samples of
+what should be rods that were selected via sorting for ds-red. Half of these
+samples are from a library prep using a quarter of the materials, the other
+half are those same samples prepared using the full materials, for comparison
+and to save on reagents.
+
+The 12 samples are split evenly between rescued and non-rescued rods, and we'd
+like to look at differences between those if possible.
+
+We also want to compare these pilot plate samples to the SMART-seq samples and make
+some determinations about which prep method worked better.
 
 ```{r qc-setup}
 base_dir = "/Users/rory/cache/wu-retina-singlecell/pilot-plate/"
@@ -45,15 +56,42 @@ known_columns = c("Name", "X.GC", "Exonic.Rate",
 summarydata$ds.red.z = (summarydata$ds.red - mean(summarydata$ds.red)) / sd(summarydata$ds.red)
 summarydata$wrow = substring(summarydata$well, 1, 1)
 summarydata$wcol = substring(summarydata$well, 2, 2)
+summarydata$Genes.Detected = colSums(counts > 0)
 full = subset(summarydata, conc == "Full")
 full_counts = counts[, colnames(counts) %in% full$Name]
 full_counts = full_counts[rowSums(full_counts > 0) > 2,]
 ```
 
+```{r heatmap-function}
+get_heatmap_fn = function(summarydata) {
+    # return the pheatmap function with or without metadata
+    metadata = summarydata[, !colnames(summarydata) %in% known_columns, drop=FALSE]
+    if(ncol(metadata) == 0) {
+       return(pheatmap)
+    }
+    else {
+    # rownames(metadata) = summarydata$Name
+    heatmap_fn = function(data, ...) {
+        pheatmap(data, annotation=metadata, ...)
+    }
+    return(heatmap_fn)
+}}
+heatmap_fn = get_heatmap_fn(summarydata)
+```
+
+First we'll try correlating the samples using the raw counts; this is a heatmap
+of Pearson correlations between the samples. The samples seem to mostly cluster
+by plate/rescued status.
+
 ```{r heatmap-annotations}
 pheatmap(cor(full_counts), annotation=summarydata[, c("rescued", "plate", "ds.red",
    "ds.red.z", "well", "wrow", "wcol")])
 ```
+
+The overall correlation between the samples is really low; and the rescued
+cells are more variable than the non-rescued cells.
+
+Clustering on the normalized counts has a similar pattern.
 
 ```{r correlation-normalized}
 y = DGEList(counts=full_counts)
@@ -61,6 +99,24 @@ y = calcNormFactors(y)
 normalized_counts = cpm(y, normalized.lib.sizes=TRUE)
 pheatmap(cor(normalized_counts), annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
 ```
+
+Spearman instead of Pearson correlation correlates based on the rank and is
+less sensitive to genes with large expression values. The Spearman correlation
+isn't very good either.
+
+```{r correlation-normalized-spearman}
+y = DGEList(counts=full_counts)
+y = calcNormFactors(y)
+normalized_counts = cpm(y, normalized.lib.sizes=TRUE)
+pheatmap(cor(normalized_counts, method="spearman"),
+         annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
+```
+
+There has been some papers looking at other methods. One is using a proportion
+correlation metric:
+http://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1004075
+
+This makes all of the correlatons look bad.
 
 ```{r correlation-propcor}
 
@@ -88,22 +144,46 @@ z = do_propcor(full_counts)
 pheatmap(z, annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
 ```
 
-```{r heatmap-function}
-get_heatmap_fn = function(summarydata) {
-    # return the pheatmap function with or without metadata
-    metadata = summarydata[, !colnames(summarydata) %in% known_columns, drop=FALSE]
-    if(ncol(metadata) == 0) {
-       return(pheatmap)
-    }
-    else {
-    # rownames(metadata) = summarydata$Name
-    heatmap_fn = function(data, ...) {
-        pheatmap(data, annotation=metadata, ...)
-    }
-    return(heatmap_fn)
-}}
-heatmap_fn = get_heatmap_fn(summarydata)
+This clusters the cells differently, just thought
+I'd try it to see what it looked like since I had just read the paper.
+
+The low correlation is likely partially caused by the excess of
+zero counts in the data. The SCDE package has some alternative methods to
+try to fix this. We'll try one of them here.
+
+```{r scde-clustering}
+library(scde)
+o.ifm = scde.error.models(counts=full_counts, groups=full$rescued,
+        save.crossfit.plots=F, n.cores=1, threshold.segmentation=T,
+        save.model.plots=F, verbose=0)
+valid.cells <- o.ifm$corr.a >0;
+o.ifm = o.ifm[valid.cells,]
+valid_counts = full_counts[, valid.cells]
+valid_summary = subset(full, rownames(full) %in% colnames(valid_counts))
+p.self.fail <- scde.failure.probability(models=o.ifm,counts=valid_counts)
+n.simulations <- 100; k <- 0.9;
+cell.names <- colnames(valid_counts); names(cell.names) <- cell.names;
+cd = valid_counts
+n.cores = 1
+dl <- mclapply(1:n.simulations,function(i) {
+  scd1 <- do.call(cbind,lapply(cell.names,function(nam) {
+    x <- cd[,nam];
+    # replace predicted drop outs with NAs
+    x[!as.logical(rbinom(length(x),1,1-p.self.fail[,nam]*k))] <- NA;
+    x;
+    }))
+  rownames(scd1) <- rownames(cd);
+  # calculate correlation on the complete observation pairs
+  cor(log10(scd1+1),use="pairwise.complete.obs");
+},mc.cores=n.cores)
+
+direct.dist <- Reduce("+",dl)/length(dl)
+pheatmap(direct.dist, annotation=valid_summary[, c("rescued", "plate",
+                                                   "Mapped")])
 ```
+
+These don't look much better though.
+
 
 # Quality control metrics
 
@@ -122,17 +202,6 @@ ggplot(summarydata, aes(x=Name, y=Mapped)) +
 ggplot(summarydata, aes(x=Name, y=Mapping.Rate)) +
     geom_bar(stat="identity") +
     ylab("mapping rate") + xlab("") +
-    theme_bw(base_size=10) +
-    theme(panel.grid.major = element_line(size = .5, color = "grey"),
-          axis.text.x = element_text(angle=90))
-```
-
-## Unique mapping rate
-```{r unique-rate-plot}
-dd = data.frame(Name=names(counts), Unique=colSums(counts), Mapped=summarydata[,"Mapped"])
-ggplot(dd, aes(x=Name, y=Unique/Mapped)) +
-    geom_bar(stat="identity") +
-    ylab("unique mapping rate") + xlab("") +
     theme_bw(base_size=10) +
     theme(panel.grid.major = element_line(size = .5, color = "grey"),
           axis.text.x = element_text(angle=90))
@@ -180,22 +249,11 @@ ggplot(summarydata, aes(x=Name, y=rRNA.rate)) +
     ylab("rRNA rate") + xlab("")
 ```
 
-## Estimated fragment length of paired-end reads
-```{r fragment-length-plot}
-ggplot(summarydata, aes(x=Name, y=Fragment.Length.Mean)) +
-    geom_bar(stat="identity") +
-    theme_bw(base_size=10) +
-    theme(panel.grid.major = element_line(size = .5, color = "grey"),
-          axis.text.x = element_text(angle=90)) +
-    ylab("fragment length") + xlab("")
-```
-
 ## Boxplot of log10 counts per gene
 ```{r boxplot-raw}
 melted = melt(counts)
 colnames(melted) = c("sample", "count")
 melted$sample = factor(melted$sample)
-melted$sample = reorder(melted$sample, colnames(counts))
 melted$count = log(melted$count)
 ggplot(melted, aes(x=sample, y=count)) + geom_boxplot() +
     theme_bw(base_size=10) +
@@ -216,7 +274,6 @@ normalized_counts = cpm(y, normalized.lib.sizes=TRUE)
 melted = melt(normalized_counts)
 colnames(melted) = c("gene", "sample", "count")
 melted$sample = factor(melted$sample)
-melted$sample = reorder(melted$sample, colnames(counts))
 melted$count = log(melted$count)
 ggplot(melted, aes(x=sample, y=count)) + geom_boxplot() +
     theme_bw(base_size=10) +
@@ -231,27 +288,6 @@ ggplot(melted, aes(x=count, group=sample)) +
     theme_bw(base_size=10) +
     theme(panel.grid.major = element_line(size = .5, color = "grey"),
           axis.text.x = element_text(angle=90)) + xlab("")
-```
-
-## Correlation (Pearson) heatmap of TMM-normalized counts
-```{r pearson-heatmap-normalized}
-heatmap_fn(cor(normalized_counts, method="pearson"))
-```
-
-## Correlation (Spearman) heatmap of TMM-normalized counts
-```{r spearman-heatmap-normalized}
-heatmap_fn(cor(normalized_counts, method="spearman"))
-```
-
-## MDS plot of TMM-normalized counts
-```{r mds-normalized}
-mds(normalized_counts, k=length(colnames(normalized_counts)) - 1)
-```
-
-## Heatmap of top 30 most expressed genes
-```{r top-count-genes, results='asis'}
-select = order(rowMeans(normalized_counts),decreasing=TRUE)[1:30]
-heatmap_fn(log(normalized_counts[select,] + 1))
 ```
 
 ## What types of RNA was sequenced?
@@ -291,19 +327,7 @@ ediff = ediff[order(ediff$pvalue),]
 
 We still can't find anything significantly different.
 
-```{r remove-noisy-genes}
-winsorize <- function(x, fraction = 0.05) {
-    if (length(fraction) != 1 || fraction < 0 || fraction > 0.5) {
-        stop("bad value for 'fraction,use < 0.5'")
-    }
-    lim <- quantile(x, probs = c(fraction, 1 - fraction))
-    x[x < lim[1]] <- lim[1]
-    x[x > lim[2]] <- lim[2]
-    x
-}
-ed = t(apply(normalized_counts, 1, winsorize, fraction=0.1))
-```
-
+## rod-cone housekeeping genes
 ```{r cone-rod-housekeeping-genes}
 rod = c("Rho","Sag","Pdc","Gnat1","Pde6g","Rom1","Gngt1","Unc119",
         "Gnb1","Gcap1","Guca1a","Pde6b","Guca2a","Prph2","Aipl1",
@@ -330,7 +354,7 @@ library(dplyr)
 symbols = symbols %>% left_join(bm, by="id")
 ```
 
-# More rod expression than cone expression
+There is more rod expression than cone expression in the pilot data:
 
 ```{r rod-expression}
 rod_vals = subset(symbols, mgi_symbol %in% rod)
@@ -339,7 +363,7 @@ rod_vals$mgi_symbol = NULL
 rod_vals$id = NULL
 rod_vals = log(rod_vals + 1)
 colnames(rod_vals) = colnames(normalized_counts)
-pheatmap(rod_vals, annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")], fontsize=6, main="rod genes")
+pheatmap(rod_vals, annotation=summarydata[, c("rescued", "plate", "Mapped", "Genes.Detected")], fontsize=6, main="rod genes")
 ```
 
 
@@ -378,7 +402,7 @@ ggplot(summarydata, aes("ds.red", ds.red)) + geom_point() + scale_y_log10() +
           axis.text.x = element_text(angle=90))
 ```
 
-## rod-cones take 2
+## clustering by the second set of rod-cone genes
 
 ```{r load-type-annotations}
 types_fn = "/Users/rory/cache/wu-retina-singlecell/metadata/gene_types.tsv"
@@ -429,7 +453,11 @@ Most of the cells seem to be enriched for the rod markers. Cells P1_3G looks
 like it might be two cells, a cone and a rod. P2_1B doens't really look
 like any of the cell types and P1_2E looks like it might be a cone.
 
-Drop those cells so we are left with just rods.
+Drop those cells so we are left with just rods. The trouble is that although the
+cells cluster by rescued and plate, in the rescued cells it looks like there is
+much less expression of rod genes even though there is a similar overall mapping
+rate for most of the samples. Does this mean these are not rods? Does rescuing them
+do something else to them?
 
 ```{r drop-non-rods}
 drop_cols = grepl("P1-3G", colnames(lcounts))
@@ -447,13 +475,68 @@ pheatmap(rod_counts[rownames(types),], fontsize=6, annotation_row=types,
 ggsave("heatmap-rods.pdf")
 ```
 
+Now go ahead and do SCDE differential expression on just the rods.
+
+## differential expression of just rods rescue
+```{r scde-analysis-rods}
+rod_raw = counts[, !drop_cols]
+rod_raw = rod_raw[, !grepl("quarter", colnames(rod_raw))]
+rod_raw = rod_raw[rowSums(rod_raw) > 0,]
+rod_summary = summarydata[colnames(rod_raw),]
+
+library(scde)
+o.ifm = scde.error.models(counts=rod_raw, groups=rod_summary$rescued,
+        save.crossfit.plots=F, n.cores=1, threshold.segmentation=T,
+        save.model.plots=F, verbose=0)
+valid.cells <- o.ifm$corr.a >0;
+o.ifm = o.ifm[valid.cells,]
+valid_counts = rod_raw[, valid.cells]
+valid_summary = subset(rod_summary, rownames(rod_summary) %in% colnames(valid_counts))
+o.prior <- scde.expression.prior(models=o.ifm,counts=valid_counts, length.out=400,show.plot=T)
+ediff = scde.expression.difference(o.ifm, valid_counts, o.prior,
+                                   groups=valid_summary$rescued,
+                                   n.randomizations=100, n.cores=1, verbose=0)
+ediff$pvalue = pnorm(-(abs(ediff$Z))) * 2
+ediff$padj = p.adjust(ediff$pvalue)
+ediff = ediff[order(ediff$pvalue),]
+```
+
+There isn't anything differentially expressed that survives the multiple
+hypothesis testing correction, but we can look at the top 50 that have
+a gene symbol by p-value at least and write that out to a table for later.
+
+```{r top-100}
+library(biomaRt)
+mouse = useMart("ensembl", dataset="mmusculus_gene_ensembl")
+symbols = getBM(mart=mouse, attributes=c("ensembl_gene_id", "mgi_symbol"))
+ediff$symbol = symbols[match(rownames(ediff), symbols$ensembl_gene_id), "mgi_symbol"]
+top_100 = head(ediff, 100)
+
+write.table(top_100, "pilot-plate-rod-only-rescue.tsv", col.names=TRUE, row.names=TRUE,
+            quote=FALSE, sep="\t")
+```
+
 ## revisiting the smart-seq data
 With these gene lists we can take another look and see if the cells cluster
-by subtype at all:
+by subtype at all.
 
 ```{r smartseq-data}
 smartseq_fn = "/Users/rory/cache/wu-retina-singlecell/05-2015-smartseq/combined.counts"
+smartseq_summary_fn = "/Users/rory/cache/wu-retina-singlecell/05-2015-smartseq/project-summary.csv"
+smartseq_summary = read.table(smartseq_summary_fn, header=TRUE, sep=",")
+smartseq_summary$Name = gsub("-", "_", smartseq_summary$Name, fixed=TRUE)
+rownames(smartseq_summary) = smartseq_summary$Name
 smartseq = read.table(smartseq_fn, header=TRUE, row.names="id")
+cnames = colnames(smartseq)
+cnames = gsub(".counts", "", cnames)
+cnames = gsub("X", "", cnames)
+cnames = gsub(".", "_", cnames, fixed=TRUE)
+colnames(smartseq) = cnames
+smartseq = smartseq[, order(colnames(smartseq))]
+smartseq_summary = smartseq_summary[order(rownames(smartseq_summary)),]
+smartseq_summary$Genes.Detected = colSums(smartseq > 0)
+smartseq_summary$HDAC4 = unlist(c(smartseq["ENSMUSG00000026313",]))
+smartseq_summary$HDAC4 = log(smartseq_summary$HDAC4 + 1)
 smartseq_dge = DGEList(counts=smartseq)
 smartseq_dge = calcNormFactors(smartseq_dge)
 smartseq_normalized = cpm(smartseq_dge, normalized.lib.sizes=TRUE)
@@ -462,24 +545,43 @@ anno_df = data.frame(type=all_types$type)
 rownames(anno_df) = all_types$id
 pheatmap(lsmartseq[rownames(types),], fontsize=6, annotation_row=anno_df,
          annotation_colors=ann_colors,
-         cluster_rows=FALSE, show_rownames=FALSE, show_colnames=FALSE)
+         cluster_rows=FALSE, show_rownames=FALSE, show_colnames=FALSE,
+         annotation=smartseq_summary[, c("location_info", "rescue", "Mapped",
+                                         "Genes.Detected", "HDAC4")])
 ggsave("heatmap-smartseq.pdf")
+```
+
+It looks like there is a set of cells on the left that express markers for
+cones and rods, as well as a set of cells that look like glia and a set of
+cells that don't really express any of these markers. There isn't any clustering
+by HDAC4 expression as well.
+
+In your email you pointed out the set of cells on the left might be cones due to
+the Opn1mw expression. It doesn't
+look like there is any clear clustering of those cells by any location info or
+rescue status though, as we can see below:
+
+```{r smartseq-cone-rod-only}
 cone_rod_smartseq = lsmartseq[cone_rod$id,]
+colnames(cone_rod_smartseq) = cnames
 rownames(cone_rod_smartseq) = cone_rod[match(rownames(cone_rod_smartseq), cone_rod$id), "mgi_symbol"]
 anno_df = data.frame(type=all_types$type)
 rownames(anno_df) = all_types$mgi_symbol
 pheatmap(cone_rod_smartseq, fontsize=6, annotation_row=anno_df,,
          cluster_rows=FALSE, annotation_colors=ann_colors,
-         annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
+         annotation=smartseq_summary[, c("location_info", "rescue", "Mapped")])
 ggsave("heatmap-smartseq-cone-rod-only.pdf")
 ```
 
-It looks like there is a set of cells on the left that have multiple cells
-per well, a set of cells that are glia and a set of cells that didn't work.
-There is also a set of genes that might be cone enriched, it is tough to
-say.
-
 ## revisiting the scrb-seq data
+I thought that maybe using these marker genes we could see some
+clustering in the SCRB-seq data, but it doesn't look like it. I'm not
+sure what to make of the SCRB-seq data, it looks like Rho is expressed in
+all of the cells but Opn1mw also looks like it is expressed in some of
+the cells. It would be interesting to see what you think about this. The
+expression pattern almost looks artifactual. I didn't do anything with
+this data other than take the UMI counts that the Broad generated.
+
 ```{r scrbseq-data}
 scrbseq_fn = "/Users/rory/cache/wu-retina-singlecell/counts/scrb-trimarchi/Cepko_Trimarchi_buffer.all.refseq.umi.dat"
 scrbseq = read.table(scrbseq_fn, header=TRUE)
@@ -500,10 +602,17 @@ cone_rod_scrbseq = lscrbseq[scrbseq_cone_rod$mgi_symbol,]
 anno_df = data.frame(type=all_types$type)
 rownames(anno_df) = all_types$mgi_symbol
 pheatmap(cone_rod_scrbseq, fontsize=6, annotation_row=anno_df,,
-         cluster_rows=FALSE, annotation_colors=ann_colors, show_colnames=FALSE,
-         annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
+         cluster_rows=FALSE, annotation_colors=ann_colors, show_colnames=FALSE)
 ggsave("heatmap-scrbseq-cone-rod-only.pdf")
 ```
+
+## what do dropseq counts look like?
+
+I was pretty impressed with the DropSeq paper; I think that might be the hot new
+thing. It is cheap, they gave plans to fab the device to do it and sequencing
+40,000 cells lets you do a lot more with the data. So far I'm a big DropSeq fan.
+
+I was curious to compare it to SCRB-seq to see how it does.
 
 ```{r dropseq}
 dropseq_fn = "/Users/rory/cache/wu-retina-singlecell/drop-seq/GSM1626793_P14Retina_1.digital_expression.txt"
@@ -527,6 +636,7 @@ qplot(colSums(dropseq > 0)) +
     scale_x_log10() + ylab("")
 ```
 
+
 For DropSeq each of these counts is an individual transcript. We detect a low number
 of genes per sample, at low counts, similar to SCRB-seq. DropSeq is more efficient
 in detecting transcripts, however:
@@ -549,13 +659,26 @@ ggplot(all, aes(reads, detected, color=type)) + geom_point() +
     theme_bw(base_size=10) +
     theme(panel.grid.major = element_line(size = .5, color = "grey"),
           axis.text.x = element_text(angle=90))
-
-ggplot(all, aes(reads, detected, color=type)) + geom_point() +
-    theme_bw(base_size=10) +
-    theme(panel.grid.major = element_line(size = .5, color = "grey"),
-          axis.text.x = element_text(angle=90))
-scrbseq = read.table(scrbseq_fn, header=TRUE)
 ```
+
+## what do the dropseq genes look like if we use our markers?
+```{r dropseq-heatmap}
+dropseq_symbols = strsplit(rownames(dropseq), ":")
+dropseq_symbols = lapply(dropseq_symbols, function(x) x[3])
+dropseq_symbols = unlist(dropseq_symbols)
+dropseq_keep = dropseq_symbols %in% rownames(anno_df)
+dropseq_cone_rod = dropseq[dropseq_keep,]
+rownames(dropseq_cone_rod) = dropseq_symbols[dropseq_keep]
+dropseq_cone_rod = log(dropseq_cone_rod + 1)
+dropseq_cone_rod = dropseq_cone_rod[rowSums(dropseq_cone_rod) > 0,]
+anno_keep = rownames(anno_df)[rownames(anno_df) %in% rownames(dropseq_cone_rod)]
+dropseq_cone_rod = dropseq_cone_rod[anno_keep,]
+pheatmap(dropseq_cone_rod, fontsize=4, annotation_row=anno_df,
+         cluster_rows=FALSE, annotation_colors=ann_colors, show_colnames=FALSE)
+```
+
+That looks pretty nice. It kind of looks similar to the SCRB-seq data, where
+a small number of genes are expressed in all of the rods. Hm.
 
 I'm kind of rethinking what I thought before about SCRB-seq; maybe it is possible to do it, but you just need a couple of orders of magnitude more cells than we've
 been looking at. In the Drop-Seq paper they sequenced 45k cells, and were able
@@ -567,6 +690,8 @@ One thing to note is that in the DropSeq paper, they picked the top 1/3 cells
 with the most number of counts to build the classifier. If we did that with just
 this 6k cell sample we took, that means the cutoff for genes detected would be
 somewhere around 1,000 genes, a pretty low amount.
+
+## DropSeq markers for rods
 
 I went into the DropSeq paper and pulled out the set of genes that were
 identified as the classifier for rods and made heatmaps of those for the
@@ -581,7 +706,6 @@ dropseq_rod_up_human <- c("CARTPT","MAF","PPP1R17","GPR22","GNG2","NR4A2","IGFBP
 dropseq_rod_down_human <- c("HBA-A1","HBB-BS","PCDH17","CHN2","SLC6A1","ELAVL2",
                             "PCDH10","CBLN2","TKT","TAC2","HPGD","MGP","MEIS2",
                             "GABRA1","SHISA9","CALD1","UNC13C","RBP1","QPCT","PTGDS")
-
 mouse = useMart("ensembl", dataset="mmusculus_gene_ensembl")
 human = useMart("ensembl", dataset="hsapiens_gene_ensembl")
 conversions = getLDS(attributes=c("entrezgene", "ensembl_gene_id",
@@ -608,9 +732,8 @@ smart_dropseq_rod <- lsmartseq[dropseq_rod_id,]
 rownames(smart_dropseq_rod) = conversions[match(rownames(smart_dropseq_rod),
                                                 conversions$Ensembl.Gene.ID),
                                                 "MGI.symbol"]
-pheatmap(smart_dropseq_rod, fontsize=6, annotation_row=anno_df,,
-         cluster_rows=FALSE, annotation_colors=ann_colors, show_colnames=FALSE,
-         annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
+pheatmap(smart_dropseq_rod, fontsize=6, annotation_row=anno_df,
+         cluster_rows=FALSE, annotation_colors=ann_colors, show_colnames=FALSE)
 ```
 
 SCRB-seq:
@@ -645,7 +768,10 @@ pheatmap(ldropseq_rod, fontsize=6, cluster_rows=FALSE)
 ```
 
 ## difference between the quarter and full samples
-```{r full-quarter correlation}
+The Spearman and Pearson correlation for the quarter and full samples looks good.
+Spearman:
+
+```{r full-quarter-correlation-spearman}
 groups <- summarydata %>% group_by(code, conc) %>% select(Name, code, conc)
 full_name <- summarydata %>% filter(conc ==  "Full") %>% select(Name, code)
 quarter_name <- summarydata %>% filter(conc ==  "Quarter") %>% select(Name, code)
@@ -663,7 +789,11 @@ qplot(names, cors) +
     theme(panel.grid.major = element_line(size = .5, color = "grey"),
           axis.text.x = element_text(angle=90)) + ylab("spearman correlation") +
           xlab("")
+```
 
+And Pearson:
+
+```{r full-quarter-pearson-correlation}
 cors <- list()
 names <- list()
 for(i in seq(nrow(full_name))) {
@@ -680,28 +810,351 @@ qplot(names, cors) +
     xlab("")
 ```
 
-```{r highly-variant-genes}
-means = rowMeans(normalized_counts)
-vars = apply(normalized_counts,1,var)
-cv2 = vars/means^2
+I think it is probably okay to use the quarter isolation method if you are going
+to use that method, it seems to work okay.
 
-par(mar=c(3.5,3.5,1,1),mgp=c(2,0.65,0),cex=0.9)
-smoothScatter(log(means),log(cv2))
-require(statmod)
-minMeanForFit <- unname( quantile( means[ which( cv2 > .3 ) ], .95 ) )
-useForFit <- means >= minMeanForFit # & spikeins
-fit <- glmgam.fit( cbind( a0 = 1, a1tilde = 1/means[useForFit] ),cv2[useForFit] )
-a0 <- unname( fit$coefficients["a0"] )
-a1 <- unname( fit$coefficients["a1tilde"])
-fit$coefficients
-afit <- a1/means+a0
-varFitRatio <- vars/(afit*means^2)
-varorder <- order(varFitRatio,decreasing=T)
-oed <- ed[varorder,]
-m <- oed[1:50,]
-heatmap(m/apply(m,1,max),zlim=c(0,1),col=gray.colors(100),Rowv=NA,Colv=NA,labRow=NA,scale="none")
+## revisiting the SMARTseq data with Seurat
+Seurat is a new single cell differential expression package for R. What is nice
+about it is it has some clustering functions that are based off of t-SNE
+clustering, which makes the nice plots in the DropSeq paper.
 
-rowsd = apply(normalized_counts, 1, sd)
+```{r serat}
+smartseq_summary_fn = "/Users/rory/cache/wu-retina-singlecell/05-2015-smartseq/project-summary.csv"
+smartseq_summary = read.table(smartseq_summary_fn, header=TRUE, sep=",")
+smartseq_summary$Name = gsub("-", "_", smartseq_summary$Name)
+rownames(smartseq_summary) = smartseq_summary$Name
 
-var = rowsd / rowMeans(normalized_counts)
+library(Seurat)
+nbd.data = data.frame(lsmartseq)
+cnames = gsub(".counts", "", colnames(lsmartseq))
+cnames = gsub("X", "", cnames)
+cnames = gsub(".", "_", cnames, fixed=TRUE)
+snames = cnames
+cnames = gsub("_", ":", cnames, fixed=TRUE)
+cnames = paste(smartseq_summary[snames,]$location_info, cnames, sep="_")
+cnames = paste(smartseq_summary[snames,]$rescue, cnames, sep=":")
+colnames(nbd.data) = cnames
+nbt = new("seurat", raw.data=nbd.data)
+nbt= setup(nbt, project="NBT", min.cells = 3, min.genes = 1000, is.expr=1,
+           names.delim="_", names.field=1)
 ```
+
+Below we identify highly variable genes and use those to do PCA on the samples.
+
+```{r identify-variable-genes}
+nbt = mean.var.plot(nbt, y.cutoff=2, x.low.cutoff=2, fxn.x=expMean,
+                    fxn.y=logVarDivMean)
+length(nbt@var.genes)
+```
+
+Below we calculate the weights for the first 10 components to pick out
+the ones that explain most of the variance, then look at the separation along
+those components. We can see components 1-6 are significant so we will use those.
+We'll drop 7 because it is easier to look at pairs of components going forward.
+
+```{r pca-jackstraw}
+nbt = pca(nbt, do.print=FALSE)
+nbt = jackStraw(nbt, num.replicate=200, do.print=FALSE)
+jackStrawPlot(nbt, PCs=1:10)
+```
+
+
+Below we plot the (1, 2), (3, 4) and (5, 6) components along with a heatmap
+of each separating the samples, then output list of the gene ids that have
+the heightest weights for each component along with a heatmap of the expression
+values.
+
+
+Components (1, 2):
+```{r pca-plot}
+pca.plot(nbt, 1, 2, pt.size=2)
+print.pca(nbt, 1:2)
+viz.pca(nbt, 1:2)
+pcHeatmap(nbt,pc.use = 1,do.balanced = FALSE)
+pcHeatmap(nbt,pc.use = 2,do.balanced = FALSE)
+```
+
+Components (3, 4):
+```{r pca-plot-3-4}
+pca.plot(nbt, 3, 4, pt.size=2)
+viz.pca(nbt, 3:4)
+pcHeatmap(nbt,pc.use = 3, do.balanced = FALSE)
+pcHeatmap(nbt,pc.use = 4, do.balanced = FALSE)
+```
+
+Components (5, 6):
+```{r pca-plot-5-6}
+pca.plot(nbt, 5, 6, pt.size=2)
+viz.pca(nbt, 5:6)
+pcHeatmap(nbt,pc.use = 5, do.balanced = FALSE)
+pcHeatmap(nbt,pc.use = 6, do.balanced = FALSE)
+```
+
+Components (7, 8):
+```{r pca-plot-7-8}
+pca.plot(nbt, 7, 8, pt.size=2)
+viz.pca(nbt, 7:8)
+pcHeatmap(nbt, pc.use = 7, do.balanced = FALSE)
+pcHeatmap(nbt, pc.use = 8, do.balanced = FALSE)
+```
+
+You can see that the principal components don't separate the cells by
+the experimental setup very well. We can run the version of clustering in
+Seurat called t-SNE, which tries to place the cells into separate groups.
+Here there is maybe some kind of separation but it isn't great.
+
+```{r tsne-run}
+nbt=run_tsne(nbt, dims.use = 1:7, max_iter=2000)
+```
+
+If we plot the markers for each condition vs the principal component, with
+the red dots having a higher weighting in that component than the yellow dots,
+we can see that there isn't a clear separation as well.
+
+```{r tsne-plot}
+tsne.plot(nbt, pt.size = 4)
+
+markers.all=find_all_markers(nbt, thresh.test = 3, test.use = "roc",
+                             do.print = TRUE)
+markers.all = markers.all[order(-markers.all$power),]
+
+pcs.plot=paste("PC",1:8,sep="")
+feature.heatmap(nbt,pcs.plot,cols.use = heat.colors(4), pt.size = 2)
+```
+
+## DESeq2 PCA plot
+DESeq2 also has its own PCA method; it takes the top 500 most variable genes
+and does PCA on them; we can also see no clear separation based on the experimental
+setup.
+```{r deseq2-pca}
+cnames = gsub(".counts", "", colnames(smartseq))
+cnames = gsub("X", "", cnames)
+cnames = gsub(".", "_", cnames, fixed=TRUE)
+colnames(smartseq) = cnames
+keep_smartseq = smartseq_summary[rownames(smartseq_summary) %in% colnames(smartseq),]
+smartseq = smartseq[, order(colnames(smartseq))]
+keep_smartseq = keep_smartseq[order(rownames(keep_smartseq)),]
+dds = DESeqDataSetFromMatrix(countData=smartseq, colData=keep_smartseq, design=~rescue)
+vst = varianceStabilizingTransformation(dds)
+plotPCA(vst, intgroup=c("rescue", "location_info"))
+```
+
+## smartseq heatmap using the Dropseq markers from the retina paper
+
+```{r dropseq-markers}
+dropseq_markers = read.table("/Users/rory/cache/wu-retina-singlecell/metadata/dropseq-marker.tsv", header=FALSE)
+dropseq_marker_id = conversions[match(dropseq_markers$V1, conversions$MGI.symbol),]$Ensembl.Gene.ID
+dropseq_marker_exp = lsmartseq[dropseq_marker_id,]
+rownames(dropseq_marker_exp) = conversions[match(dropseq_marker_id,
+   conversions$Ensembl.Gene.ID),]$MGI.symbol
+pheatmap(dropseq_marker_exp)
+```
+
+## Was the pilot-plate worse than the smart-seq data?
+
+It looks like the pilot-plate worked pretty well given that it only
+had a small amount of reads in the FASTQ files, averaging around 300k. Here
+is a plot of the SMART-seq vs the pilot plate experiment, looking at saturation,
+with the points scaled for percentage of reads mapped. The pilot-plate data looks
+pretty good, and you can can see many failed cells for the SMART-seq data.
+
+```{r saturation-plot-both}
+dd = data.frame(Mapped=summarydata$Mapped, Genes.Detected = colSums(counts > 0),
+                plate="pilot", rate=summarydata$Mapping.Rate)
+dd2 <- data.frame(Mapped=smartseq_summary$Mapped, Genes.Detected=colSums(smartseq > 0),
+                  plate="smartseq", rate=smartseq_summary$Mapping.Rate)
+saturation <- rbind(dd, dd2)
+ggplot(saturation, aes(x=Mapped, y=Genes.Detected, color=plate, size=rate)) +
+    geom_point() + scale_size(range=c(1,3)) +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    ylab("genes detected") + xlab("reads mapped") + scale_x_log10()
+```
+
+## Do the SMART-seq cells cluster by reads mapping to GFP?
+
+Only a small set of the cells have GFP expression:
+
+```{r gfp-reads}
+smartseq_gfp = read.table("/Volumes/Clotho/Users/rory/cache/wu-retina-singlecell/05-2015-smartseq/gfp-reads/gfp_reads.counts", header=FALSE)
+colnames(smartseq_gfp) = c("Name", "gfp")
+smartseq_gfp$Name = gsub("-", "_", smartseq_gfp$Name)
+smartseq_summary = merge(smartseq_summary, smartseq_gfp, by="Name")
+
+ggplot(smartseq_summary, aes(Mapped, gfp)) +
+    geom_point() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    scale_x_sqrt() +
+    scale_y_sqrt()
+```
+
+```{r fix-smartseq-columns}
+cnames = colnames(smartseq)
+cnames = gsub(".counts", "", cnames)
+cnames = gsub("X", "", cnames)
+cnames = gsub(".", "_", cnames, fixed=TRUE)
+colnames(smartseq) = cnames
+cnames = colnames(smartseq_normalized)
+cnames = gsub(".counts", "", cnames)
+cnames = gsub("X", "", cnames)
+cnames = gsub(".", "_", cnames, fixed=TRUE)
+colnames(smartseq_normalized) = cnames
+rownames(smartseq_summary) = smartseq_summary$Name
+smartseq_summary$lgfp = log(smartseq_summary$gfp + 1)
+```
+
+Cells don't cluster by number of reads of GFP using Pearson correlation of the
+TMM-normalized counts:
+
+```{r cluster-smartseq-with-gfp}
+pheatmap(cor(smartseq_normalized), annotation=smartseq_summary[, c("lgfp", "Mapped")])
+```
+
+Using the SCDE method of clustering which takes into account some of the
+dropouts:
+
+```{r calculate-smartseq-ifm}
+library(scde)
+smartseq = smartseq[,colSums(smartseq)>1e4];
+smartseq = smartseq[rowSums(smartseq) > 0,]
+o.ifm = scde.error.models(counts=smartseq,
+        save.crossfit.plots=F, n.cores=1, threshold.segmentation=T,
+        save.model.plots=F, verbose=0)
+```
+
+```{r calculate-distance-smartseq-scde}
+valid.cells <- o.ifm$corr.a >0;
+o.ifm = o.ifm[valid.cells,]
+valid_counts = smartseq[, valid.cells]
+valid_summary = subset(smartseq_summary, rownames(smartseq_summary) %in% colnames(valid_counts))
+p.self.fail <- scde.failure.probability(models=o.ifm,counts=valid_counts)
+n.simulations <- 100; k <- 0.9;
+cell.names <- colnames(valid_counts); names(cell.names) <- cell.names;
+cd = valid_counts
+n.cores = 1
+dl <- mclapply(1:n.simulations,function(i) {
+  scd1 <- do.call(cbind,lapply(cell.names,function(nam) {
+    x <- cd[,nam];
+    # replace predicted drop outs with NAs
+    x[!as.logical(rbinom(length(x),1,1-p.self.fail[,nam]*k))] <- NA;
+    x;
+    }))
+  rownames(scd1) <- rownames(cd);
+  # calculate correlation on the complete observation pairs
+  cor(log10(scd1+1),use="pairwise.complete.obs");
+},mc.cores=n.cores)
+```
+
+```{r heatmap-smartseq-scde}
+direct.dist <- Reduce("+",dl)/length(dl)
+direct.dist = direct.dist[, colSums(is.na(direct.dist)) > 0]
+pheatmap(direct.dist, annotation=valid_summary[, c("rescue", "location_info",
+                                                   "Mapped", "lgfp")],
+         fontsize=6)
+```
+
+Neither of these really look like they are clustering by any of the metadata.
+
+Looking at just the cone and rod markers, the number of GFP reads seems to
+somewhat be associated with the cells that express a lot of the marker genes in
+general. I'm not really sure what to make of that though.
+
+## adding location info and rescue to the SMARTseq cone-rod heatmap
+You can see in the possible cone cells on the left, there doesn't seem to be
+a clustering by any of the experimental variables.
+
+```{r smart-dropseq-markers-gfp}
+cnames = colnames(cone_rod_smartseq)
+cnames = gsub(".counts", "", cnames)
+cnames = gsub("X", "", cnames)
+cnames = gsub(".", "_", cnames, fixed=TRUE)
+colnames(cone_rod_smartseq) = cnames
+pheatmap(cone_rod_smartseq, fontsize=6, annotation_row=anno_df,
+         cluster_rows=FALSE, annotation_colors=ann_colors, show_colnames=FALSE,
+         annotation=smartseq_summary[, c("Mapped", "lgfp", "rescue", "location_info")])
+```
+
+## scrbseq-umi vs non-umi counts
+```{r scrbseq-umi-vs-nonumi}
+scrbseq_umi_fn = "/Volumes/Clotho/Users/rory/cache/wu-retina-singlecell/01-scrbseq/Cepko_Trimarchi_buffer.unq.refseq.umi.dat"
+scrbseq_umi = read.table(scrbseq_umi_fn, header=TRUE)
+colnames(scrbseq_umi) = gsub("T384s", "", colnames(scrbseq_umi))
+scrbseq_total_fn = "/Volumes/Clotho/Users/rory/cache/wu-retina-singlecell/01-scrbseq/Cepko_Trimarchi_buffer.unq.refseq.total.dat"
+scrbseq_total = read.table(scrbseq_total_fn, header=TRUE)
+colnames(scrbseq_total) = gsub("T384s", "", colnames(scrbseq_total))
+
+umi_counts = colSums(scrbseq_umi)
+total_counts = colSums(scrbseq_total)
+
+qplot(umi_counts/total_counts) +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90)) +
+    xlab("(UMI counts in sample) / (total counts in sample)")
+```
+
+There are 12,982,672 total alignments in genes but only 863,176 of them are
+unique after taking into account the UMI. That indicates these libraries are
+likely to be non-complex. Some cells are better than others but most samples
+it is about 10-1.
+
+SCRB-seq just grabs the tail end of the transcript; there might be degradation of
+the RNA happening which is causing the libraries to be not complex. We can
+see that by looking at the 5'->3' bias.
+
+## 5'->3' bias in the pilot plate and SMART-seq
+The pilot experiment has a much higher 5'-3' bias than the SMART-seq data. This
+bias means more reads are mapped to the 5' end than the 3' end of the data. I'm
+not sure what is different between the library preparation methods; sometimes
+if a stranded protocol is run this can look like that. Other times it can be
+a sign of degradation of the RNA, though usually that looks like a bias towards
+the 3' end not the 5' end.
+
+```{r smartseq-pilot-bias}
+a = data.frame(duplication=summarydata$Duplication.Rate.of.Mapped,
+               bias=summarydata$X5.3.bias,
+               experiment="pilot-plate")
+b = data.frame(duplication=smartseq_summary$Duplication.Rate.of.Mapped,
+               bias=smartseq_summary$X5.3.bias,
+               experiment="smartseq")
+d = rbind(a, b)
+
+ggplot(d, aes(duplication, bias, color=experiment)) + geom_point() +
+    theme_bw(base_size=10) +
+    theme(panel.grid.major = element_line(size = .5, color = "grey"),
+          axis.text.x = element_text(angle=90))
+```
+
+## comparing the pilot plate run paired and unpaired
+
+There are some differences between the paired and unpaired samples, but for
+the most part they are similar with correlation values > 0.98.
+
+```{r paired-vs-unpaired}
+paired = read.table("/Volumes/Clotho/Users/rory/cache/wu-retina-singlecell/pilot-plate-paired/combined.counts", header=TRUE, row.names="id")
+cnames = colnames(paired)
+cnames = gsub("_R.counts", "", cnames)
+cnames = gsub("X", "", cnames)
+cnames = gsub(".", "_", cnames, fixed=TRUE)
+colnames(paired) <- cnames
+paired <- paired[, cnames[order(cnames)]]
+
+qplot(paired[,1], counts[,1])
+qplot(paired[,2], counts[,2])
+```
+
+
+## wrapup
+I don't have very many recommendations at this point; we're trying to solve
+which technology works better and also look at three or four different experiments
+at once, it makes it really hard to say anything definitive.
+
+Any way I slice these datasets, we can't seem to pull out anything that
+makes sense.
+
+If this was my experiment I'd try to make it a lot simpler; we're having problems
+now even figuring out what cells are being captured. No set of markers that
+we've looked at seem to separate out the cones and rods.
