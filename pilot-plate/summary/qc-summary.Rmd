@@ -60,6 +60,9 @@ summarydata$Genes.Detected = colSums(counts > 0)
 full = subset(summarydata, conc == "Full")
 full_counts = counts[, colnames(counts) %in% full$Name]
 full_counts = full_counts[rowSums(full_counts > 0) > 2,]
+summarydata$HDAC4 = unlist(c(counts["ENSMUSG00000026313",]))
+summarydata$HDAC4 = log(summarydata$HDAC4 + 1)
+
 ```
 
 ```{r heatmap-function}
@@ -445,8 +448,14 @@ anno_df = data.frame(type=all_types$type)
 rownames(anno_df) = all_types$mgi_symbol
 pheatmap(cone_rod_counts, fontsize=6, annotation_row=anno_df,,
          cluster_rows=FALSE, annotation_colors=ann_colors,
-         annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
+         annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z", "HDAC4")])
 ggsave("heatmap-cone-rod-only.pdf")
+housekeeping_counts = lcounts[subset(all_types, type == "housekeeping")$id,]
+rownames(housekeeping_counts) = all_types[match(rownames(housekeeping_counts), all_types$id), "mgi_symbol"]
+pheatmap(housekeeping_counts, fontsize=6, annotation_row=anno_df,
+         cluster_rows=FALSE, annotation_colors=ann_colors,
+         annotation=summarydata[, c("rescued", "plate", "Mapped", "ds.red.z")])
+ggsave("pilot-plate-housekeeping-only-heatmap.pdf")
 ```
 
 Most of the cells seem to be enriched for the rod markers. Cells P1_3G looks
@@ -549,6 +558,11 @@ pheatmap(lsmartseq[rownames(types),], fontsize=6, annotation_row=anno_df,
          annotation=smartseq_summary[, c("location_info", "rescue", "Mapped",
                                          "Genes.Detected", "HDAC4")])
 ggsave("heatmap-smartseq.pdf")
+housekeeping_counts = lsmartseq[subset(all_types, type == "housekeeping")$id,]
+rownames(housekeeping_counts) = all_types[match(rownames(housekeeping_counts), all_types$id), "mgi_symbol"]
+pheatmap(housekeeping_counts, fontsize=6, annotation_row=anno_df,
+         cluster_rows=FALSE, annotation_colors=ann_colors)
+ggsave("smartseq-housekeeping-only-heatmap.pdf")
 ```
 
 It looks like there is a set of cells on the left that express markers for
